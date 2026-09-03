@@ -73,7 +73,6 @@ class SetupInteractiveView(discord.ui.View):
         if guild_id not in self.cog.log_channels:
             self.cog.log_channels[guild_id] = {}
 
-        # Save to Memory & File
         self.cog.log_channels[guild_id][self.selected_log_type] = self.selected_channel.id
         save_log_channels(self.cog.log_channels)
 
@@ -84,7 +83,6 @@ class SetupInteractiveView(discord.ui.View):
             color=discord.Color.green()
         )
         
-        # Disable view items after saving
         for child in self.children:
             child.disabled = True
             
@@ -97,6 +95,7 @@ class SetupInteractiveView(discord.ui.View):
 class ModLogs(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self.db = bot.db
         self.log_channels = load_log_channels()
         self.vc_sessions = {}
         self.invites = {}
@@ -342,3 +341,4 @@ class ModLogs(commands.Cog):
 
 async def setup(bot):
     await bot.add_cog(ModLogs(bot))
+            
