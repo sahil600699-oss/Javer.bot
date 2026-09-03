@@ -1,14 +1,12 @@
 import discord
 from discord.ext import commands
-import asyncio
 
 class AutoSend(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        # Memory storage: {(guild_id, user_id): {"amount": int, "message": str}}
+        self.db = bot.db
         self.active_tasks = {}
 
-    # --- AUTO LISTEN LISTENER ---
     @commands.Cog.listener()
     async def on_message(self, message):
         if message.author.bot or not message.guild:
@@ -19,27 +17,20 @@ class AutoSend(commands.Cog):
         if key in self.active_tasks:
             task = self.active_tasks[key]
             
-            # Set kiya gaya message user ko send/reply karein
             try:
                 await message.channel.send(f"{message.author.mention} {task['message']}")
             except Exception as e:
                 print(f"AutoSend Error: {e}")
 
-            # Amount decrement karein
             task['amount'] -= 1
 
-            # Amount 0 hote hi task auto-remove kar dein
             if task['amount'] <= 0:
                 del self.active_tasks[key]
                 await message.channel.send(f"✅ {message.author.mention} ke liye AutoSend process complete aur auto-off ho gaya hai!")
 
-    # --- MAIN COMMAND GROUP ---
     @commands.group(name="autosend", invoke_without_command=True)
     @commands.has_permissions(manage_messages=True)
     async def autosend_group(self, ctx, member: discord.Member = None, amount: int = None, *, custom_message: str = None):
-        """!autosend @user [amount] [message] command handle karta hai"""
-        
-        # Agar parameters missing hon toh usage hint dein
         if not member or not amount or not custom_message:
             await ctx.send("❓ Incorrect Usage! Proper Format: `!autosend @user [amount] [message]`\nHelp ke liye type karein: `!autosend help`")
             return
@@ -62,7 +53,6 @@ class AutoSend(commands.Cog):
         embed.set_footer(text=f"Turn off karne ke liye '!autosendoff {member.display_name}' type karein.")
         await ctx.send(embed=embed)
 
-    # --- HELP COMMAND ---
     @autosend_group.command(name="help")
     async def autosend_help(self, ctx):
         embed = discord.Embed(
@@ -88,7 +78,6 @@ class AutoSend(commands.Cog):
         embed.set_footer(text="Requires 'Manage Messages' permission.")
         await ctx.send(embed=embed)
 
-    # --- AUTOSEND OFF COMMAND ---
     @commands.command(name="autosendoff")
     @commands.has_permissions(manage_messages=True)
     async def autosend_off(self, ctx, member: discord.Member):
@@ -108,3 +97,4 @@ class AutoSend(commands.Cog):
 
 async def setup(bot):
     await bot.add_cog(AutoSend(bot))
+    
