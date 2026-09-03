@@ -1,28 +1,6 @@
 import discord
 from discord.ext import commands
-import sqlite3
 from datetime import datetime, timedelta
-
-DB_NAME = "msg_tracker.db"
-
-# --- DATABASE SETUP ---
-def init_db():
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS message_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            guild_id INTEGER,
-            channel_id INTEGER,
-            user_id INTEGER,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    conn.commit()
-    conn.close()
-
-init_db()
-
 
 # --- INTERACTIVE DROPDOWN MENU ---
 class MsgCommandSelect(discord.ui.Select):
@@ -75,14 +53,11 @@ class MsgTopPaginationView(discord.ui.View):
         self.guild = guild
         self.current_page = 1
         
-        # Add Dropdown Menu at Row 1
         self.add_item(MsgCommandSelect(bot))
         self.update_buttons()
 
     def update_buttons(self):
-        # Prev Button
         self.prev_btn.disabled = (self.current_page == 1)
-        # Next Button
         self.next_btn.disabled = (self.current_page == 2 or len(self.rows) <= 10)
 
     def create_embed(self):
@@ -139,26 +114,38 @@ class MsgDropdownView(discord.ui.View):
 class MsgTracker(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self.db = bot.db
+        self.init_db()
+
+    def init_db(self):
+        cursor = self.db.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS message_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER,
+                channel_id INTEGER,
+                user_id INTEGER,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        self.db.commit()
 
     @commands.Cog.listener()
     async def on_message(self, message):
         if message.author.bot or not message.guild:
             return
 
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
+        cursor = self.db.cursor()
         cursor.execute(
             "INSERT INTO message_logs (guild_id, channel_id, user_id) VALUES (?, ?, ?)",
             (message.guild.id, message.channel.id, message.author.id)
         )
-        conn.commit()
-        conn.close()
+        self.db.commit()
 
     async def get_msg_top_data(self, guild, author):
         time_24h_ago = datetime.utcnow() - timedelta(hours=24)
         
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
+        cursor = self.db.cursor()
         cursor.execute('''
             SELECT user_id, COUNT(*) as msg_count 
             FROM message_logs 
@@ -168,7 +155,6 @@ class MsgTracker(commands.Cog):
             LIMIT 20
         ''', (guild.id, time_24h_ago))
         rows = cursor.fetchall()
-        conn.close()
 
         if not rows:
             embed = discord.Embed(
@@ -186,8 +172,7 @@ class MsgTracker(commands.Cog):
     async def get_msgw_top_data(self, guild, author):
         time_7d_ago = datetime.utcnow() - timedelta(days=7)
         
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
+        cursor = self.db.cursor()
         cursor.execute('''
             SELECT user_id, COUNT(*) as msg_count 
             FROM message_logs 
@@ -197,7 +182,6 @@ class MsgTracker(commands.Cog):
             LIMIT 10
         ''', (guild.id, time_7d_ago))
         rows = cursor.fetchall()
-        conn.close()
 
         embed = discord.Embed(
             title="⭐ Top Members Leaderboard (Weekly / 7 Days)",
@@ -220,8 +204,7 @@ class MsgTracker(commands.Cog):
     async def get_msg_user_data(self, guild, target_user):
         time_24h_ago = datetime.utcnow() - timedelta(hours=24)
         
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
+        cursor = self.db.cursor()
         cursor.execute('''
             SELECT channel_id, COUNT(*) as msg_count 
             FROM message_logs 
@@ -230,7 +213,6 @@ class MsgTracker(commands.Cog):
             ORDER BY msg_count DESC
         ''', (guild.id, target_user.id, time_24h_ago))
         rows = cursor.fetchall()
-        conn.close()
 
         embed = discord.Embed(
             title=f"📊 24h Message Breakdown — {target_user.display_name}",
@@ -260,8 +242,7 @@ class MsgTracker(commands.Cog):
         time_24h_ago = datetime.utcnow() - timedelta(hours=24)
         time_7d_ago = datetime.utcnow() - timedelta(days=7)
 
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
+        cursor = self.db.cursor()
         
         cursor.execute('''
             SELECT COUNT(*) FROM message_logs 
@@ -274,8 +255,6 @@ class MsgTracker(commands.Cog):
             WHERE guild_id = ? AND user_id = ? AND timestamp >= ?
         ''', (guild.id, target_user.id, time_7d_ago))
         count_7d = cursor.fetchone()[0]
-
-        conn.close()
 
         embed = discord.Embed(
             title=f"📈 Overview Stats — {target_user.display_name}",
@@ -333,3 +312,4 @@ class MsgTracker(commands.Cog):
 
 async def setup(bot):
     await bot.add_cog(MsgTracker(bot))
+            
