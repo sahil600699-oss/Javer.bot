@@ -1,4 +1,3 @@
-import sqlite3
 from datetime import datetime
 import discord
 from discord.ext import commands
@@ -17,17 +16,14 @@ class DirectChannelSelect(discord.ui.ChannelSelect):
         await interaction.response.defer(ephemeral=True)
         
         channel = self.values[0]
-        conn = sqlite3.connect("welcome_config.db")
-        cursor = conn.cursor()
         
+        cursor = self.cog.db.cursor()
         cursor.execute("""
             INSERT INTO welcome_settings (guild_id, channel_id, show_member_count, show_boost_count, show_account_age)
             VALUES (?, ?, 1, 1, 1)
             ON CONFLICT(guild_id) DO UPDATE SET channel_id = excluded.channel_id
         """, (self.guild_id, channel.id))
-        
-        conn.commit()
-        conn.close()
+        self.cog.db.commit()
 
         embed = discord.Embed(
             title="✅ Welcome Channel Configured!",
@@ -57,11 +53,11 @@ class DirectChannelView(discord.ui.View):
 class Welcome(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self.db = bot.db
         self.init_db()
 
     def init_db(self):
-        conn = sqlite3.connect("welcome_config.db")
-        cursor = conn.cursor()
+        cursor = self.db.cursor()
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS welcome_settings (
                 guild_id INTEGER PRIMARY KEY,
@@ -74,37 +70,31 @@ class Welcome(commands.Cog):
             )
         """)
         
-        # Safely add column if updating existing database
         try:
             cursor.execute("ALTER TABLE welcome_settings ADD COLUMN show_account_age INTEGER DEFAULT 1")
-        except sqlite3.OperationalError:
-            pass # Column already exists
+        except Exception:
+            pass 
             
-        conn.commit()
-        conn.close()
+        self.db.commit()
 
     def get_settings(self, guild_id):
-        conn = sqlite3.connect("welcome_config.db")
-        cursor = conn.cursor()
+        cursor = self.db.cursor()
         cursor.execute("""
             SELECT channel_id, description, image_url, show_member_count, show_boost_count, show_account_age 
             FROM welcome_settings WHERE guild_id = ?
         """, (guild_id,))
         data = cursor.fetchone()
-        conn.close()
         return data
 
     def update_setting(self, guild_id, column, value):
-        conn = sqlite3.connect("welcome_config.db")
-        cursor = conn.cursor()
+        cursor = self.db.cursor()
         cursor.execute("""
             INSERT INTO welcome_settings (guild_id, show_member_count, show_boost_count, show_account_age)
             VALUES (?, 1, 1, 1)
             ON CONFLICT(guild_id) DO NOTHING
         """, (guild_id,))
         cursor.execute(f"UPDATE welcome_settings SET {column} = ? WHERE guild_id = ?", (value, guild_id))
-        conn.commit()
-        conn.close()
+        self.db.commit()
 
     @commands.group(name="welcome", invoke_without_command=True)
     @commands.has_permissions(administrator=True)
@@ -221,11 +211,9 @@ class Welcome(commands.Cog):
     @welcome.command(name="disable")
     @commands.has_permissions(administrator=True)
     async def disable_welcome(self, ctx):
-        conn = sqlite3.connect("welcome_config.db")
-        cursor = conn.cursor()
+        cursor = self.db.cursor()
         cursor.execute("DELETE FROM welcome_settings WHERE guild_id = ?", (ctx.guild.id,))
-        conn.commit()
-        conn.close()
+        self.db.commit()
         await ctx.send("❌ Welcome system completely disabled.")
 
     @commands.Cog.listener()
@@ -291,3 +279,4 @@ class Welcome(commands.Cog):
 
 async def setup(bot):
     await bot.add_cog(Welcome(bot))
+                
