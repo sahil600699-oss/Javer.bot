@@ -1,46 +1,36 @@
 import discord
 from discord.ext import commands
-import sqlite3
 from datetime import datetime
-
-DB_NAME = "afk_system.db"
-
-# --- DATABASE SETUP ---
-def init_db():
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS afk_users (
-            guild_id INTEGER,
-            user_id INTEGER,
-            reason TEXT,
-            afk_since DATETIME DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (guild_id, user_id)
-        )
-    ''')
-    conn.commit()
-    conn.close()
-
-init_db()
 
 class AFK(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self.db = bot.db
+        self.init_db()
 
-    # --- AUTO UN-AFK & MENTION ALERT LISTENER ---
+    def init_db(self):
+        cursor = self.db.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS afk_users (
+                guild_id INTEGER,
+                user_id INTEGER,
+                reason TEXT,
+                afk_since DATETIME DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (guild_id, user_id)
+            )
+        ''')
+        self.db.commit()
+
     @commands.Cog.listener()
     async def on_message(self, message):
         if message.author.bot or not message.guild:
             return
 
-        # ⚠️ FIX: Agar user !afk command use kar raha hai, toh auto-unafk trigger NAI hoga!
         if message.content.lower().startswith("!afk"):
             return
 
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
+        cursor = self.db.cursor()
 
-        # 1. Check: Kya Sender AFK list me hai? (DUSRA message aane par hi remove hoga)
         cursor.execute(
             "SELECT reason, afk_since FROM afk_users WHERE guild_id = ? AND user_id = ?",
             (message.guild.id, message.author.id)
@@ -48,12 +38,11 @@ class AFK(commands.Cog):
         row = cursor.fetchone()
 
         if row:
-            # AFK status remove karein
             cursor.execute(
                 "DELETE FROM afk_users WHERE guild_id = ? AND user_id = ?",
                 (message.guild.id, message.author.id)
             )
-            conn.commit()
+            self.db.commit()
             
             embed = discord.Embed(
                 description=f"👋 Welcome back {message.author.mention}! Aapka **AFK** status remove kar diya gaya hai.",
@@ -61,7 +50,6 @@ class AFK(commands.Cog):
             )
             await message.channel.send(embed=embed)
 
-        # 2. Check: Kya kisi AFK Member ko mention kiya gaya hai?
         if message.mentions:
             for member in message.mentions:
                 if member.id == message.author.id:
@@ -101,14 +89,9 @@ class AFK(commands.Cog):
                     await message.channel.send(embed=embed)
                     break
 
-        conn.close()
-
-    # --- AFK COMMAND GROUP ---
     @commands.group(name="afk", invoke_without_command=True)
     async def afk_group(self, ctx, *, reason: str = "AFK"):
-        """!afk [reason] command handle karta hai"""
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
+        cursor = self.db.cursor()
 
         current_time_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -117,8 +100,7 @@ class AFK(commands.Cog):
             VALUES (?, ?, ?, ?)
         ''', (ctx.guild.id, ctx.author.id, reason, current_time_str))
 
-        conn.commit()
-        conn.close()
+        self.db.commit()
 
         embed = discord.Embed(
             description=f"💤 {ctx.author.mention} ab **AFK** hain.\n📝 **Reason:** {reason}",
@@ -126,7 +108,6 @@ class AFK(commands.Cog):
         )
         await ctx.send(embed=embed)
 
-    # --- AFK HELP ---
     @afk_group.command(name="help")
     async def afk_help(self, ctx):
         embed = discord.Embed(
@@ -143,3 +124,4 @@ class AFK(commands.Cog):
 
 async def setup(bot):
     await bot.add_cog(AFK(bot))
+    
