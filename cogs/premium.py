@@ -1,44 +1,7 @@
 import discord
 from discord.ext import commands
-import sqlite3
 import datetime
 import config
-
-DB_NAME = "premium_system.db"
-
-# --- DATABASE SETUP ---
-def init_db():
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS premium_plans (
-            plan_name TEXT PRIMARY KEY,
-            allowed_commands TEXT
-        )
-    ''')
-    
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS premium_holders (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            target_type TEXT,
-            target_id INTEGER,
-            guild_id INTEGER,
-            plan_name TEXT,
-            expires_at TIMESTAMP
-        )
-    ''')
-
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS locked_commands (
-            command_name TEXT PRIMARY KEY,
-            required_plan TEXT
-        )
-    ''')
-    conn.commit()
-    conn.close()
-
-init_db()
 
 # --- HELPER FUNCTIONS ---
 def parse_duration(time_str: str):
@@ -61,42 +24,6 @@ def parse_duration(time_str: str):
 def is_owner_check(ctx):
     return ctx.author.id == getattr(config, "OWNER_ID", None)
 
-def has_premium_access(user_id: int, guild_id: int, command_name: str) -> bool:
-    if user_id == getattr(config, "OWNER_ID", None):
-        return True
-        
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    now = datetime.datetime.utcnow()
-
-    cursor.execute("SELECT plan_name, allowed_commands FROM premium_plans")
-    plans = cursor.fetchall()
-    
-    for plan_name, cmds_str in plans:
-        allowed_cmds = [c.strip().lower() for c in cmds_str.split(",")]
-        if command_name.lower() in allowed_cmds or "*" in allowed_cmds:
-            cursor.execute('''
-                SELECT expires_at FROM premium_holders 
-                WHERE plan_name = ? AND (
-                    (target_type = 'user' AND target_id = ?) OR
-                    (target_type = 'server' AND guild_id = ?) OR
-                    (target_type = 'su' AND target_id = ? AND guild_id = ?)
-                )
-            ''', (plan_name, user_id, guild_id, user_id, guild_id))
-            
-            rows = cursor.fetchall()
-            for (exp_str,) in rows:
-                if exp_str is None:
-                    conn.close()
-                    return True
-                exp_dt = datetime.datetime.fromisoformat(exp_str)
-                if exp_dt > now:
-                    conn.close()
-                    return True
-
-    conn.close()
-    return False
-
 # --- INTERACTIVE COMPONENTS ---
 
 class CommandSelect(discord.ui.Select):
@@ -107,7 +34,6 @@ class CommandSelect(discord.ui.Select):
             discord.SelectOption(label="Bot Customization", value="botprofile", description="Permission for !serverpfp, !servernick, !serverb"),
             discord.SelectOption(label="Mass Unban", value="massunban", description="Permission for Mass Unban command")
         ]
-        # Multi-select fixed: max_values dynamically set to len(options)
         super().__init__(placeholder="Permissions select karein...", min_values=1, max_values=len(options), options=options)
 
     async def callback(self, interaction: discord.Interaction):
@@ -115,8 +41,9 @@ class CommandSelect(discord.ui.Select):
         self.view.selected_cmds = self.values
 
 class PlanCreateView(discord.ui.View):
-    def __init__(self, plan_name, owner_id):
+    def __init__(self, cog, plan_name, owner_id):
         super().__init__(timeout=120)
+        self.cog = cog
         self.plan_name = plan_name
         self.owner_id = owner_id
         self.selected_cmds = []
@@ -134,15 +61,13 @@ class PlanCreateView(discord.ui.View):
             return await interaction.response.send_message("❌ Pehle permission select karein!", ephemeral=True)
 
         cmds_str = ",".join(self.selected_cmds)
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
+        cursor = self.cog.db.cursor()
         cursor.execute('''
             INSERT INTO premium_plans (plan_name, allowed_commands) 
             VALUES (?, ?)
             ON CONFLICT(plan_name) DO UPDATE SET allowed_commands = excluded.allowed_commands
         ''', (self.plan_name, cmds_str))
-        conn.commit()
-        conn.close()
+        self.cog.db.commit()
 
         embed = discord.Embed(
             title="✅ Premium Plan Created!",
@@ -156,6 +81,69 @@ class PlanCreateView(discord.ui.View):
 class PremiumSystem(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self.db = bot.db
+        self.init_db()
+
+    def init_db(self):
+        cursor = self.db.cursor()
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS premium_plans (
+                plan_name TEXT PRIMARY KEY,
+                allowed_commands TEXT
+            )
+        ''')
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS premium_holders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                target_type TEXT,
+                target_id INTEGER,
+                guild_id INTEGER,
+                plan_name TEXT,
+                expires_at TIMESTAMP
+            )
+        ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS locked_commands (
+                command_name TEXT PRIMARY KEY,
+                required_plan TEXT
+            )
+        ''')
+        self.db.commit()
+
+    def has_premium_access(self, user_id: int, guild_id: int, command_name: str) -> bool:
+        if user_id == getattr(config, "OWNER_ID", None):
+            return True
+            
+        cursor = self.db.cursor()
+        now = datetime.datetime.utcnow()
+
+        cursor.execute("SELECT plan_name, allowed_commands FROM premium_plans")
+        plans = cursor.fetchall()
+        
+        for plan_name, cmds_str in plans:
+            allowed_cmds = [c.strip().lower() for c in cmds_str.split(",")]
+            if command_name.lower() in allowed_cmds or "*" in allowed_cmds:
+                cursor.execute('''
+                    SELECT expires_at FROM premium_holders 
+                    WHERE plan_name = ? AND (
+                        (target_type = 'user' AND target_id = ?) OR
+                        (target_type = 'server' AND guild_id = ?) OR
+                        (target_type = 'su' AND target_id = ? AND guild_id = ?)
+                    )
+                ''', (plan_name, user_id, guild_id, user_id, guild_id))
+                
+                rows = cursor.fetchall()
+                for (exp_str,) in rows:
+                    if exp_str is None:
+                        return True
+                    exp_dt = datetime.datetime.fromisoformat(exp_str)
+                    if exp_dt > now:
+                        return True
+
+        return False
 
     async def cog_check(self, ctx):
         if not is_owner_check(ctx):
@@ -169,7 +157,7 @@ class PremiumSystem(commands.Cog):
         if not plan_name:
             return await ctx.send("❌ Usage: `!pcreate <plan_name>`")
         
-        view = PlanCreateView(plan_name.lower(), ctx.author.id)
+        view = PlanCreateView(self, plan_name.lower(), ctx.author.id)
         embed = discord.Embed(
             title=f"🔨 Creating Premium Plan: {plan_name}",
             description="Dropdown menu se permissions select karein (Multi-select enabled ya `*` select karein) aur Confirm click karein.",
@@ -186,8 +174,7 @@ class PremiumSystem(commands.Cog):
         plan = plan_name.lower()
         cmd = command_name.lower()
 
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
+        cursor = self.db.cursor()
         cursor.execute("SELECT allowed_commands FROM premium_plans WHERE plan_name = ?", (plan,))
         row = cursor.fetchone()
 
@@ -202,8 +189,7 @@ class PremiumSystem(commands.Cog):
             cursor.execute("INSERT INTO premium_plans (plan_name, allowed_commands) VALUES (?, ?)", (plan, cmd))
             msg = f"✅ Naya Plan **`{plan}`** banaya gaya aur usme **`{cmd}`** permission add kar di gayi!"
 
-        conn.commit()
-        conn.close()
+        self.db.commit()
         await ctx.send(msg)
 
     # 3. GIVE PREMIUM ACCESS
@@ -220,12 +206,10 @@ class PremiumSystem(commands.Cog):
         if exp_dt == -1:
             return await ctx.send("❌ Invalid Time Format! (Use: `1d`, `1m`, `1y`, or `perm`)")
 
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
+        cursor = self.db.cursor()
         cursor.execute("INSERT INTO premium_holders (target_type, target_id, plan_name, expires_at) VALUES ('user', ?, ?, ?)",
                        (member.id, plan_name.lower(), exp_dt.isoformat() if exp_dt else None))
-        conn.commit()
-        conn.close()
+        self.db.commit()
 
         await ctx.send(f"✅ **{member.display_name}** ko Global Premium **`{plan_name}`** de diya gaya hai.")
 
@@ -235,12 +219,10 @@ class PremiumSystem(commands.Cog):
             return await ctx.send("❌ Usage: `!pgive server <plan_name> [time]`")
 
         exp_dt = parse_duration(time_str)
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
+        cursor = self.db.cursor()
         cursor.execute("INSERT INTO premium_holders (target_type, guild_id, plan_name, expires_at) VALUES ('server', ?, ?, ?)",
                        (ctx.guild.id, plan_name.lower(), exp_dt.isoformat() if exp_dt else None))
-        conn.commit()
-        conn.close()
+        self.db.commit()
 
         await ctx.send(f"🎉 Server **{ctx.guild.name}** ko Premium **`{plan_name}`** de diya gaya hai!")
 
@@ -250,23 +232,19 @@ class PremiumSystem(commands.Cog):
             return await ctx.send("❌ Usage: `!pgive su @user <plan_name> [time]`")
 
         exp_dt = parse_duration(time_str)
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
+        cursor = self.db.cursor()
         cursor.execute("INSERT INTO premium_holders (target_type, target_id, guild_id, plan_name, expires_at) VALUES ('su', ?, ?, ?, ?)",
                        (member.id, ctx.guild.id, plan_name.lower(), exp_dt.isoformat() if exp_dt else None))
-        conn.commit()
-        conn.close()
+        self.db.commit()
 
         await ctx.send(f"✅ **{member.display_name}** ko Single-Server Premium **`{plan_name}`** de diya gaya.")
 
     # 4. LIST PLANS
     @commands.command(name="plist")
     async def plist(self, ctx):
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
+        cursor = self.db.cursor()
         cursor.execute("SELECT plan_name, allowed_commands FROM premium_plans")
         rows = cursor.fetchall()
-        conn.close()
 
         if not rows:
             return await ctx.send("📑 Koi Premium Plan nahi hai!")
@@ -324,3 +302,4 @@ class PremiumSystem(commands.Cog):
 
 async def setup(bot):
     await bot.add_cog(PremiumSystem(bot))
+        
