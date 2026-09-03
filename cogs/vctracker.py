@@ -1,29 +1,6 @@
 import discord
 from discord.ext import commands
-import sqlite3
 from datetime import datetime, timedelta
-
-DB_NAME = "vc_tracker.db"
-
-# --- DATABASE SETUP ---
-def init_db():
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS vc_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            guild_id INTEGER,
-            channel_id INTEGER,
-            user_id INTEGER,
-            duration_seconds INTEGER,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    conn.commit()
-    conn.close()
-
-init_db()
-
 
 # --- INTERACTIVE DROPDOWN MENU ---
 class VcCommandSelect(discord.ui.Select):
@@ -77,14 +54,11 @@ class VcTopPaginationView(discord.ui.View):
         self.format_func = format_func
         self.current_page = 1
         
-        # Add Dropdown at Row 1
         self.add_item(VcCommandSelect(bot))
         self.update_buttons()
 
     def update_buttons(self):
-        # Prev Button
         self.prev_btn.disabled = (self.current_page == 1)
-        # Next Button
         self.next_btn.disabled = (self.current_page == 2 or len(self.rows) <= 10)
 
     def create_embed(self):
@@ -145,7 +119,23 @@ class VcDropdownView(discord.ui.View):
 class VcTracker(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self.db = bot.db
         self.active_sessions = {}
+        self.init_db()
+
+    def init_db(self):
+        cursor = self.db.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS vc_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER,
+                channel_id INTEGER,
+                user_id INTEGER,
+                duration_seconds INTEGER,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        self.db.commit()
 
     def format_seconds(self, seconds):
         minutes, sec = divmod(seconds, 60)
@@ -172,14 +162,12 @@ class VcTracker(commands.Cog):
                 ch_id, join_time = session
                 duration = int((now - join_time).total_seconds())
                 if duration > 0:
-                    conn = sqlite3.connect(DB_NAME)
-                    cursor = conn.cursor()
+                    cursor = self.db.cursor()
                     cursor.execute(
                         "INSERT INTO vc_logs (guild_id, channel_id, user_id, duration_seconds) VALUES (?, ?, ?, ?)",
                         (member.guild.id, ch_id, member.id, duration)
                     )
-                    conn.commit()
-                    conn.close()
+                    self.db.commit()
 
         elif before.channel is not None and after.channel is not None and before.channel.id != after.channel.id:
             session = self.active_sessions.pop(member.id, None)
@@ -187,21 +175,18 @@ class VcTracker(commands.Cog):
                 ch_id, join_time = session
                 duration = int((now - join_time).total_seconds())
                 if duration > 0:
-                    conn = sqlite3.connect(DB_NAME)
-                    cursor = conn.cursor()
+                    cursor = self.db.cursor()
                     cursor.execute(
                         "INSERT INTO vc_logs (guild_id, channel_id, user_id, duration_seconds) VALUES (?, ?, ?, ?)",
                         (member.guild.id, ch_id, member.id, duration)
                     )
-                    conn.commit()
-                    conn.close()
+                    self.db.commit()
             self.active_sessions[member.id] = (after.channel.id, now)
 
     async def get_vc_top_data(self, guild, author):
         time_24h_ago = datetime.utcnow() - timedelta(hours=24)
         
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
+        cursor = self.db.cursor()
         cursor.execute('''
             SELECT user_id, SUM(duration_seconds) as total_duration 
             FROM vc_logs 
@@ -211,7 +196,6 @@ class VcTracker(commands.Cog):
             LIMIT 20
         ''', (guild.id, time_24h_ago))
         rows = cursor.fetchall()
-        conn.close()
 
         if not rows:
             embed = discord.Embed(
@@ -229,8 +213,7 @@ class VcTracker(commands.Cog):
     async def get_vcw_top_data(self, guild, author):
         time_7d_ago = datetime.utcnow() - timedelta(days=7)
         
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
+        cursor = self.db.cursor()
         cursor.execute('''
             SELECT user_id, SUM(duration_seconds) as total_duration 
             FROM vc_logs 
@@ -240,7 +223,6 @@ class VcTracker(commands.Cog):
             LIMIT 10
         ''', (guild.id, time_7d_ago))
         rows = cursor.fetchall()
-        conn.close()
 
         embed = discord.Embed(
             title="👑 Top VC Active Members (Weekly / 7 Days)",
@@ -264,8 +246,7 @@ class VcTracker(commands.Cog):
     async def get_vc_user_data(self, guild, target_user):
         time_24h_ago = datetime.utcnow() - timedelta(hours=24)
         
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
+        cursor = self.db.cursor()
         cursor.execute('''
             SELECT channel_id, SUM(duration_seconds) as total_sec 
             FROM vc_logs 
@@ -274,7 +255,6 @@ class VcTracker(commands.Cog):
             ORDER BY total_sec DESC
         ''', (guild.id, target_user.id, time_24h_ago))
         rows = cursor.fetchall()
-        conn.close()
 
         embed = discord.Embed(
             title=f"📊 24h VC Activity Breakdown — {target_user.display_name}",
@@ -304,8 +284,7 @@ class VcTracker(commands.Cog):
         time_24h_ago = datetime.utcnow() - timedelta(hours=24)
         time_7d_ago = datetime.utcnow() - timedelta(days=7)
 
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
+        cursor = self.db.cursor()
         
         cursor.execute('''
             SELECT SUM(duration_seconds) FROM vc_logs 
@@ -318,8 +297,6 @@ class VcTracker(commands.Cog):
             WHERE guild_id = ? AND user_id = ? AND timestamp >= ?
         ''', (guild.id, target_user.id, time_7d_ago))
         sec_7d = cursor.fetchone()[0] or 0
-
-        conn.close()
 
         embed = discord.Embed(
             title=f"📈 Overview VC Stats — {target_user.display_name}",
@@ -377,3 +354,4 @@ class VcTracker(commands.Cog):
 
 async def setup(bot):
     await bot.add_cog(VcTracker(bot))
+        
