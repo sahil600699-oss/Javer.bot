@@ -102,6 +102,7 @@ async def main():
             'cogs.msgtracker',
             'cogs.role',
             'cogs.kingdom',
+            'cogs.antinuke',
             'cogs.welcome',
             'cogs.imposter',
             'cogs.modlogs',
