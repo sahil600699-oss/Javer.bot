@@ -5,7 +5,6 @@ from discord.ext import commands
 from .views import BaseRoleSelectView, MultiRoleSelectView, PlanAddRoleView
 from .db import init_db, is_owner_or_bot_owner, get_assignable_roles
 
-
 class RoleManager(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -182,11 +181,10 @@ class RoleManager(commands.Cog):
 
     @plan_group.command(name="details")
     async def plan_details(self, ctx, name: str):
-        conn = sqlite3.connect("role_management.db")
-        cursor = conn.cursor()
-        cursor.execute("SELECT role_id FROM role_presets WHERE guild_id = ? AND preset_name = ?", (ctx.guild.id, name.lower()))
-        rows = cursor.fetchall()
-        conn.close()
+        with sqlite3.connect("role_management.db") as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT role_id FROM role_presets WHERE guild_id = ? AND preset_name = ?", (ctx.guild.id, name.lower()))
+            rows = cursor.fetchall()
 
         if not rows:
             return await ctx.send(f"❌ Plan `{name.lower()}` not found!")
@@ -221,11 +219,10 @@ class RoleManager(commands.Cog):
 
     @plan_group.command(name="list")
     async def plan_list(self, ctx):
-        conn = sqlite3.connect("role_management.db")
-        cursor = conn.cursor()
-        cursor.execute("SELECT preset_name, role_id FROM role_presets WHERE guild_id = ?", (ctx.guild.id,))
-        rows = cursor.fetchall()
-        conn.close()
+        with sqlite3.connect("role_management.db") as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT preset_name, role_id FROM role_presets WHERE guild_id = ?", (ctx.guild.id,))
+            rows = cursor.fetchall()
 
         if not rows:
             return await ctx.send("❌ No role plans saved.")
@@ -246,11 +243,10 @@ class RoleManager(commands.Cog):
         if not is_owner_or_bot_owner(ctx):
             return await ctx.send("❌ Server owner permission required!")
 
-        conn = sqlite3.connect("role_management.db")
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM role_presets WHERE guild_id = ? AND preset_name = ?", (ctx.guild.id, name.lower()))
-        conn.commit()
-        conn.close()
+        with sqlite3.connect("role_management.db") as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM role_presets WHERE guild_id = ? AND preset_name = ?", (ctx.guild.id, name.lower()))
+            conn.commit()
         await ctx.send(f"🗑️ Plan **{name.lower()}** deleted.")
 
     @role_group.command(name="paste")
@@ -258,11 +254,10 @@ class RoleManager(commands.Cog):
         if not is_owner_or_bot_owner(ctx):
             return await ctx.send("❌ Server owner permission required!")
 
-        conn = sqlite3.connect("role_management.db")
-        cursor = conn.cursor()
-        cursor.execute("SELECT role_id FROM role_presets WHERE guild_id = ? AND preset_name = ?", (ctx.guild.id, name.lower()))
-        rows = cursor.fetchall()
-        conn.close()
+        with sqlite3.connect("role_management.db") as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT role_id FROM role_presets WHERE guild_id = ? AND preset_name = ?", (ctx.guild.id, name.lower()))
+            rows = cursor.fetchall()
 
         if not rows:
             return await ctx.send(f"❌ Plan `{name.lower()}` not found!")
@@ -380,14 +375,13 @@ class RoleManager(commands.Cog):
 
         async def callback(interaction: discord.Interaction, role: discord.Role):
             await interaction.response.defer(ephemeral=True)
-            conn = sqlite3.connect("role_management.db")
-            cursor = conn.cursor()
-            cursor.execute(
-                "INSERT INTO autoroles (guild_id, human_role_id) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET human_role_id = excluded.human_role_id",
-                (ctx.guild.id, role.id)
-            )
-            conn.commit()
-            conn.close()
+            with sqlite3.connect("role_management.db") as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "INSERT INTO autoroles (guild_id, human_role_id) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET human_role_id = excluded.human_role_id",
+                    (ctx.guild.id, role.id)
+                )
+                conn.commit()
             await interaction.followup.send(f"✅ Human auto-role configured: {role.mention}", ephemeral=True)
 
         view = BaseRoleSelectView(roles, callback, ctx=ctx)
@@ -402,14 +396,13 @@ class RoleManager(commands.Cog):
 
         async def callback(interaction: discord.Interaction, role: discord.Role):
             await interaction.response.defer(ephemeral=True)
-            conn = sqlite3.connect("role_management.db")
-            cursor = conn.cursor()
-            cursor.execute(
-                "INSERT INTO autoroles (guild_id, bot_role_id) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET bot_role_id = excluded.bot_role_id",
-                (ctx.guild.id, role.id)
-            )
-            conn.commit()
-            conn.close()
+            with sqlite3.connect("role_management.db") as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "INSERT INTO autoroles (guild_id, bot_role_id) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET bot_role_id = excluded.bot_role_id",
+                    (ctx.guild.id, role.id)
+                )
+                conn.commit()
             await interaction.followup.send(f"🤖 Bot auto-role configured: {role.mention}", ephemeral=True)
 
         view = BaseRoleSelectView(roles, callback, ctx=ctx)
@@ -417,11 +410,10 @@ class RoleManager(commands.Cog):
 
     @commands.Cog.listener()
     async def on_member_join(self, member):
-        conn = sqlite3.connect("role_management.db")
-        cursor = conn.cursor()
-        cursor.execute("SELECT human_role_id, bot_role_id FROM autoroles WHERE guild_id = ?", (member.guild.id,))
-        data = cursor.fetchone()
-        conn.close()
+        with sqlite3.connect("role_management.db") as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT human_role_id, bot_role_id FROM autoroles WHERE guild_id = ?", (member.guild.id,))
+            data = cursor.fetchone()
 
         if data:
             human_id, bot_id = data
@@ -435,3 +427,4 @@ class RoleManager(commands.Cog):
 
 async def setup(bot):
     await bot.add_cog(RoleManager(bot))
+        
