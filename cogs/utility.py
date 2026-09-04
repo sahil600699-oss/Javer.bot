@@ -1,12 +1,13 @@
 import discord
 from discord.ext import commands
 import aiohttp
-from cogs.premium import has_premium_access
+import asyncio
 
 class Utility(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
+    # Helper: Fetch image bytes safely
     async def get_image_bytes(self, ctx, url: str = None):
         if ctx.message.attachments:
             url = ctx.message.attachments[0].url
@@ -14,10 +15,13 @@ class Utility(commands.Cog):
         if not url:
             return None
 
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as resp:
-                if resp.status == 200:
-                    return await resp.read()
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url) as resp:
+                    if resp.status == 200:
+                        return await resp.read()
+        except Exception as e:
+            print(f"Image fetch error: {e}")
         return None
 
     # ==========================================
@@ -43,57 +47,49 @@ class Utility(commands.Cog):
     async def user_banner(self, ctx, member: discord.Member = None):
         target = member or ctx.author
         
-        # User object fetch mandatory to load banner
-        user = await self.bot.fetch_user(target.id)
+        try:
+            # User object fetch mandatory to load profile banner
+            user = await self.bot.fetch_user(target.id)
 
-        if not user.banner:
-            return await ctx.send(f"❌ **{user.display_name}** ke paas koi profile banner nahi hai!")
+            if not user.banner:
+                return await ctx.send(f"❌ **{user.display_name}** ke paas koi profile banner nahi hai!")
 
-        banner_url = user.banner.url
-        embed = discord.Embed(
-            title=f"🖼️ {user.display_name}'s Banner",
-            color=discord.Color.purple()
-        )
-        embed.set_image(url=banner_url)
-        embed.add_field(name="🔗 Direct Link", value=f"[Download Banner]({banner_url})")
-        await ctx.send(embed=embed)
+            banner_url = user.banner.url
+            embed = discord.Embed(
+                title=f"🖼️ {user.display_name}'s Banner",
+                color=discord.Color.purple()
+            )
+            embed.set_image(url=banner_url)
+            embed.add_field(name="🔗 Direct Link", value=f"[Download Banner]({banner_url})")
+            await ctx.send(embed=embed)
+        except Exception as e:
+            await ctx.send(f"❌ Error fetching banner: {e}")
 
     # ==========================================
-    # 1. SERVER PFP CHANGE (!serverpfp [url/image])
+    # 1. BOT SERVER AVATAR CHANGE (!serverpfp)
     # ==========================================
     @commands.command(name="serverpfp")
     async def server_pfp(self, ctx, url: str = None):
-        if not has_premium_access(ctx.author.id, ctx.guild.id if ctx.guild else 0, "botprofile"):
-            embed = discord.Embed(
-                title="👑 Premium Only!",
-                description="❌ Aapke paas **`botprofile`** Premium Permission nahi hai!",
-                color=discord.Color.red()
-            )
-            return await ctx.send(embed=embed)
+        if not ctx.author.guild_permissions.administrator:
+            return await ctx.send("⛔ Is command ko use karne ke liye `Administrator` permission chahiye!")
 
         img_bytes = await self.get_image_bytes(ctx, url)
         if not img_bytes:
             return await ctx.send("❌ Image attach karein ya direct image link dein!")
 
         try:
-            await ctx.guild.me.edit(avatar=img_bytes)
-            await ctx.send("✅ **Is Server ke liye Bot ka Profile Picture (Avatar) change kar diya gaya hai!**")
+            # Note: Global bot avatar update
+            await self.bot.user.edit(avatar=img_bytes)
+            await ctx.send("✅ **Bot ka Profile Picture (Avatar) change kar diya gaya hai!**")
         except Exception as e:
             await ctx.send(f"❌ Error: {e}")
 
     # ==========================================
-    # 2. SERVER NICKNAME CHANGE (!servernick [name])
+    # 2. BOT SERVER NICKNAME CHANGE (!servernick)
     # ==========================================
     @commands.command(name="servernick")
+    @commands.has_permissions(manage_nicknames=True)
     async def server_nick(self, ctx, *, new_nick: str = None):
-        if not has_premium_access(ctx.author.id, ctx.guild.id if ctx.guild else 0, "botprofile"):
-            embed = discord.Embed(
-                title="👑 Premium Only!",
-                description="❌ Aapke paas **`botprofile`** Premium Permission nahi hai!",
-                color=discord.Color.red()
-            )
-            return await ctx.send(embed=embed)
-
         if not new_nick:
             return await ctx.send("❌ Usage: `!servernick <new_name>`")
 
@@ -108,13 +104,8 @@ class Utility(commands.Cog):
     # ==========================================
     @commands.command(name="serverb", aliases=["serverbanner"])
     async def server_banner(self, ctx, url: str = None):
-        if not has_premium_access(ctx.author.id, ctx.guild.id if ctx.guild else 0, "botprofile"):
-            embed = discord.Embed(
-                title="👑 Premium Only!",
-                description="❌ Aapke paas **`botprofile`** Premium Permission nahi hai!",
-                color=discord.Color.red()
-            )
-            return await ctx.send(embed=embed)
+        if not ctx.author.guild_permissions.administrator:
+            return await ctx.send("⛔ Is command ko use karne ke liye `Administrator` permission chahiye!")
 
         img_bytes = await self.get_image_bytes(ctx, url)
         if not img_bytes:
@@ -128,3 +119,4 @@ class Utility(commands.Cog):
 
 async def setup(bot):
     await bot.add_cog(Utility(bot))
+        
