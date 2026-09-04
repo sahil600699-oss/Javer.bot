@@ -1,5 +1,5 @@
-import asyncio
 import os
+import asyncio
 import threading
 from flask import Flask
 import discord
@@ -7,18 +7,20 @@ from discord.ext import commands
 from pymongo import MongoClient
 import config
 
-# --- Keep Alive Flask Server ---
+# --- Keep Alive Flask Server (Non-blocking) ---
 app = Flask('')
 
 @app.route('/')
 def home():
-    return 'Bot is alive!'
+    return 'Bot is live and active!', 200
 
-def run():
-    app.run(host='0.0.0.0', port=8080)
+def run_flask():
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
 
 def keep_alive():
-    t = threading.Thread(target=run)
+    t = threading.Thread(target=run_flask)
+    t.daemon = True
     t.start()
 
 keep_alive()
@@ -34,8 +36,6 @@ if MONGO_URI:
         db = cluster['javer_database']
         print('[MongoDB] Successfully connected to javer_database!')
 
-        # --- COMPLETE STORAGE RECOVERY (WELCOME, VC, MSG TRACKER, LOGS, ETC) ---
-        # List of all possible feature storage collections in your cogs
         storage_collections = [
             'welcome_setup', 'welcome', 
             'mod_logs', 'modlogs', 'logs',
@@ -54,7 +54,6 @@ if MONGO_URI:
                     if coll in old_db.list_collection_names():
                         docs = list(old_db[coll].find())
                         if docs:
-                            # Transfer missing documents to main database
                             for doc in docs:
                                 db[coll].update_one({"_id": doc["_id"]}, {"$set": doc}, upsert=True)
                             print(f'[MongoDB Universal Recovery] Restored {len(docs)} records for `{coll}` from DB: `{old_db_name}`')
@@ -73,7 +72,7 @@ intents.presences = False
 PREFIXES = commands.when_mentioned_or('.', ',', '-', '?', '$', ';', '/', ':', "'", '!')
 
 bot = commands.Bot(command_prefix=PREFIXES, intents=intents, help_command=None)
-bot.db = db  # Sabhi Cogs mein unified database reference bind ho gaya
+bot.db = db  # Global database instance bound to bot
 
 @bot.event
 async def on_ready():
@@ -123,8 +122,15 @@ async def main():
                 print(f'Error loading {cog}: {e}')
 
         token = os.getenv('BOT_TOKEN', getattr(config, 'BOT_TOKEN', None))
+        if not token:
+            print("❌ ERROR: BOT_TOKEN Environment variable is not set!")
+            return
+            
         await bot.start(token)
 
 if __name__ == '__main__':
-    asyncio.run(main())
-      
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("Bot shutdown gracefully.")
+        
