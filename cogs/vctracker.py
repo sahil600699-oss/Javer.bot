@@ -1,6 +1,6 @@
 import discord
 from discord.ext import commands
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 # --- INTERACTIVE DROPDOWN MENU ---
 class VcCommandSelect(discord.ui.Select):
@@ -78,7 +78,9 @@ class VcTopPaginationView(discord.ui.View):
             rank_title = "📍 Rank 11 - 20"
 
         lines = []
-        for idx, (user_id, total_sec) in enumerate(page_rows, start_rank):
+        for idx, item in enumerate(page_rows, start_rank):
+            user_id = item["_id"]
+            total_sec = item["total_duration"]
             member = self.guild.get_member(user_id)
             name = member.display_name if member else f"User `{user_id}`"
             formatted_time = self.format_func(total_sec)
@@ -119,25 +121,17 @@ class VcDropdownView(discord.ui.View):
 class VcTracker(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.db = bot.db
         self.active_sessions = {}
-        self.init_db()
 
-    def init_db(self):
-        cursor = self.db.cursor()
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS vc_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                guild_id INTEGER,
-                channel_id INTEGER,
-                user_id INTEGER,
-                duration_seconds INTEGER,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        self.db.commit()
+    @property
+    def collection(self):
+        # Universal MongoDB collection instance fetch
+        if self.bot.db is not None:
+            return self.bot.db['vc_logs']
+        return None
 
     def format_seconds(self, seconds):
+        seconds = int(seconds or 0)
         minutes, sec = divmod(seconds, 60)
         hours, minutes = divmod(minutes, 60)
         if hours > 0:
@@ -148,54 +142,59 @@ class VcTracker(commands.Cog):
 
     @commands.Cog.listener()
     async def on_voice_state_update(self, member, before, after):
-        if member.bot:
+        if member.bot or self.collection is None:
             return
 
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
+        # VC Join
         if before.channel is None and after.channel is not None:
             self.active_sessions[member.id] = (after.channel.id, now)
 
+        # VC Leave
         elif before.channel is not None and after.channel is None:
             session = self.active_sessions.pop(member.id, None)
             if session:
                 ch_id, join_time = session
                 duration = int((now - join_time).total_seconds())
                 if duration > 0:
-                    cursor = self.db.cursor()
-                    cursor.execute(
-                        "INSERT INTO vc_logs (guild_id, channel_id, user_id, duration_seconds) VALUES (?, ?, ?, ?)",
-                        (member.guild.id, ch_id, member.id, duration)
-                    )
-                    self.db.commit()
+                    self.collection.insert_one({
+                        "guild_id": member.guild.id,
+                        "channel_id": ch_id,
+                        "user_id": member.id,
+                        "duration_seconds": duration,
+                        "timestamp": now
+                    })
 
+        # Channel Switch
         elif before.channel is not None and after.channel is not None and before.channel.id != after.channel.id:
             session = self.active_sessions.pop(member.id, None)
             if session:
                 ch_id, join_time = session
                 duration = int((now - join_time).total_seconds())
                 if duration > 0:
-                    cursor = self.db.cursor()
-                    cursor.execute(
-                        "INSERT INTO vc_logs (guild_id, channel_id, user_id, duration_seconds) VALUES (?, ?, ?, ?)",
-                        (member.guild.id, ch_id, member.id, duration)
-                    )
-                    self.db.commit()
+                    self.collection.insert_one({
+                        "guild_id": member.guild.id,
+                        "channel_id": ch_id,
+                        "user_id": member.id,
+                        "duration_seconds": duration,
+                        "timestamp": now
+                    })
             self.active_sessions[member.id] = (after.channel.id, now)
 
     async def get_vc_top_data(self, guild, author):
-        time_24h_ago = datetime.utcnow() - timedelta(hours=24)
+        if self.collection is None:
+            return discord.Embed(title="Error", description="Database connection error!"), None
+
+        time_24h_ago = datetime.now(timezone.utc) - timedelta(hours=24)
         
-        cursor = self.db.cursor()
-        cursor.execute('''
-            SELECT user_id, SUM(duration_seconds) as total_duration 
-            FROM vc_logs 
-            WHERE guild_id = ? AND timestamp >= ? 
-            GROUP BY user_id 
-            ORDER BY total_duration DESC 
-            LIMIT 20
-        ''', (guild.id, time_24h_ago))
-        rows = cursor.fetchall()
+        pipeline = [
+            {"$match": {"guild_id": guild.id, "timestamp": {"$gte": time_24h_ago}}},
+            {"$group": {"_id": "$user_id", "total_duration": {"$sum": "$duration_seconds"}}},
+            {"$sort": {"total_duration": -1}},
+            {"$limit": 20}
+        ]
+        rows = list(self.collection.aggregate(pipeline))
 
         if not rows:
             embed = discord.Embed(
@@ -207,33 +206,31 @@ class VcTracker(commands.Cog):
 
         view = VcTopPaginationView(self.bot, author, rows, guild, self.format_seconds)
         embed = view.create_embed()
-
         return embed, view
 
     async def get_vcw_top_data(self, guild, author):
-        time_7d_ago = datetime.utcnow() - timedelta(days=7)
-        
-        cursor = self.db.cursor()
-        cursor.execute('''
-            SELECT user_id, SUM(duration_seconds) as total_duration 
-            FROM vc_logs 
-            WHERE guild_id = ? AND timestamp >= ? 
-            GROUP BY user_id 
-            ORDER BY total_duration DESC 
-            LIMIT 10
-        ''', (guild.id, time_7d_ago))
-        rows = cursor.fetchall()
+        if self.collection is None:
+            return discord.Embed(title="Error", description="Database connection error!"), None
 
-        embed = discord.Embed(
-            title="👑 Top VC Active Members (Weekly / 7 Days)",
-            color=discord.Color.purple()
-        )
+        time_7d_ago = datetime.now(timezone.utc) - timedelta(days=7)
+        
+        pipeline = [
+            {"$match": {"guild_id": guild.id, "timestamp": {"$gte": time_7d_ago}}},
+            {"$group": {"_id": "$user_id", "total_duration": {"$sum": "$duration_seconds"}}},
+            {"$sort": {"total_duration": -1}},
+            {"$limit": 10}
+        ]
+        rows = list(self.collection.aggregate(pipeline))
+
+        embed = discord.Embed(title="👑 Top VC Active Members (Weekly / 7 Days)", color=discord.Color.purple())
 
         if not rows:
             embed.description = "⚠️ Is week koi Voice activity record nahi mila."
         else:
             description_lines = []
-            for idx, (user_id, total_sec) in enumerate(rows, 1):
+            for idx, item in enumerate(rows, 1):
+                user_id = item["_id"]
+                total_sec = item["total_duration"]
                 member = guild.get_member(user_id)
                 name = member.mention if member else f"User `{user_id}`"
                 formatted_time = self.format_seconds(total_sec)
@@ -244,17 +241,17 @@ class VcTracker(commands.Cog):
         return embed, VcDropdownView(self.bot, author)
 
     async def get_vc_user_data(self, guild, target_user):
-        time_24h_ago = datetime.utcnow() - timedelta(hours=24)
+        if self.collection is None:
+            return discord.Embed(title="Error", description="Database connection error!"), None
+
+        time_24h_ago = datetime.now(timezone.utc) - timedelta(hours=24)
         
-        cursor = self.db.cursor()
-        cursor.execute('''
-            SELECT channel_id, SUM(duration_seconds) as total_sec 
-            FROM vc_logs 
-            WHERE guild_id = ? AND user_id = ? AND timestamp >= ? 
-            GROUP BY channel_id 
-            ORDER BY total_sec DESC
-        ''', (guild.id, target_user.id, time_24h_ago))
-        rows = cursor.fetchall()
+        pipeline = [
+            {"$match": {"guild_id": guild.id, "user_id": target_user.id, "timestamp": {"$gte": time_24h_ago}}},
+            {"$group": {"_id": "$channel_id", "total_sec": {"$sum": "$duration_seconds"}}},
+            {"$sort": {"total_sec": -1}}
+        ]
+        rows = list(self.collection.aggregate(pipeline))
 
         embed = discord.Embed(
             title=f"📊 24h VC Activity Breakdown — {target_user.display_name}",
@@ -262,13 +259,15 @@ class VcTracker(commands.Cog):
         )
         embed.set_thumbnail(url=target_user.display_avatar.url)
 
-        total_24h_sec = sum(total_sec for _, total_sec in rows)
+        total_24h_sec = sum(item["total_sec"] for item in rows)
         
         if not rows:
             embed.description = "⚠️ Pichle 24 ghante me is user ne VC use nahi kiya hai."
         else:
             channel_breakdown = []
-            for ch_id, total_sec in rows:
+            for item in rows:
+                ch_id = item["_id"]
+                total_sec = item["total_sec"]
                 ch = guild.get_channel(ch_id)
                 ch_name = ch.mention if ch else f"#deleted-vc"
                 channel_breakdown.append(f"• {ch_name}: **{self.format_seconds(total_sec)}**")
@@ -281,22 +280,28 @@ class VcTracker(commands.Cog):
         return embed, VcDropdownView(self.bot, target_user, target_user)
 
     async def get_vcw_user_data(self, guild, target_user):
-        time_24h_ago = datetime.utcnow() - timedelta(hours=24)
-        time_7d_ago = datetime.utcnow() - timedelta(days=7)
+        if self.collection is None:
+            return discord.Embed(title="Error", description="Database connection error!"), None
 
-        cursor = self.db.cursor()
-        
-        cursor.execute('''
-            SELECT SUM(duration_seconds) FROM vc_logs 
-            WHERE guild_id = ? AND user_id = ? AND timestamp >= ?
-        ''', (guild.id, target_user.id, time_24h_ago))
-        sec_24h = cursor.fetchone()[0] or 0
+        now = datetime.now(timezone.utc)
+        time_24h_ago = now - timedelta(hours=24)
+        time_7d_ago = now - timedelta(days=7)
 
-        cursor.execute('''
-            SELECT SUM(duration_seconds) FROM vc_logs 
-            WHERE guild_id = ? AND user_id = ? AND timestamp >= ?
-        ''', (guild.id, target_user.id, time_7d_ago))
-        sec_7d = cursor.fetchone()[0] or 0
+        # 24h Total
+        pipeline_24h = [
+            {"$match": {"guild_id": guild.id, "user_id": target_user.id, "timestamp": {"$gte": time_24h_ago}}},
+            {"$group": {"_id": None, "total": {"$sum": "$duration_seconds"}}}
+        ]
+        res_24h = list(self.collection.aggregate(pipeline_24h))
+        sec_24h = res_24h[0]["total"] if res_24h else 0
+
+        # 7d Total
+        pipeline_7d = [
+            {"$match": {"guild_id": guild.id, "user_id": target_user.id, "timestamp": {"$gte": time_7d_ago}}},
+            {"$group": {"_id": None, "total": {"$sum": "$duration_seconds"}}}
+        ]
+        res_7d = list(self.collection.aggregate(pipeline_7d))
+        sec_7d = res_7d[0]["total"] if res_7d else 0
 
         embed = discord.Embed(
             title=f"📈 Overview VC Stats — {target_user.display_name}",
@@ -354,4 +359,4 @@ class VcTracker(commands.Cog):
 
 async def setup(bot):
     await bot.add_cog(VcTracker(bot))
-        
+            
