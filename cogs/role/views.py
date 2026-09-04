@@ -64,7 +64,7 @@ class MultiRoleSelectView(discord.ui.View):
 
         confirm_btn = discord.ui.Button(
             label="Confirm & Apply Roles",
-            style=discord.ButtonStyle.secondary,
+            style=discord.ButtonStyle.green,
             emoji="⚙️",
             custom_id="confirm_roles"
         )
@@ -130,11 +130,10 @@ class MultiRoleSelectView(discord.ui.View):
         if interaction.user.id != self.ctx.author.id:
             return await interaction.response.send_message("❌ You cannot use this menu!", ephemeral=True)
 
-        await interaction.response.defer()
-
         if not self.selected_roles:
-            return await interaction.followup.send("❌ No roles selected to assign!", ephemeral=True)
+            return await interaction.response.send_message("❌ No roles selected to assign!", ephemeral=True)
 
+        await interaction.response.defer()
         roles_to_add = list(self.selected_roles)
         try:
             await self.target_user.add_roles(*roles_to_add, reason=f"Managed by {interaction.user}")
@@ -220,7 +219,7 @@ class PlanAddRoleView(discord.ui.View):
 
         confirm_btn = discord.ui.Button(
             label="Confirm & Save to Plan",
-            style=discord.ButtonStyle.secondary,
+            style=discord.ButtonStyle.green,
             emoji="💾",
             custom_id="confirm_plan_roles"
         )
@@ -283,27 +282,24 @@ class PlanAddRoleView(discord.ui.View):
         if interaction.user.id != self.ctx.author.id:
             return await interaction.response.send_message("❌ You cannot use this menu!", ephemeral=True)
 
+        if not self.selected_roles:
+            return await interaction.response.send_message("❌ Please select at least one role to add!", ephemeral=True)
+
         await interaction.response.defer()
 
-        if not self.selected_roles:
-            return await interaction.followup.send("❌ Please select at least one role to add!", ephemeral=True)
-
-        conn = sqlite3.connect("role_management.db")
-        cursor = conn.cursor()
-
-        added_count = 0
-        for role in self.selected_roles:
-            try:
-                cursor.execute(
-                    "INSERT INTO role_presets (guild_id, preset_name, role_id) VALUES (?, ?, ?)",
-                    (interaction.guild.id, self.plan_name.lower(), role.id)
-                )
-                added_count += 1
-            except sqlite3.IntegrityError:
-                pass
-
-        conn.commit()
-        conn.close()
+        with sqlite3.connect("role_management.db") as conn:
+            cursor = conn.cursor()
+            added_count = 0
+            for role in self.selected_roles:
+                try:
+                    cursor.execute(
+                        "INSERT INTO role_presets (guild_id, preset_name, role_id) VALUES (?, ?, ?)",
+                        (interaction.guild.id, self.plan_name.lower(), role.id)
+                    )
+                    added_count += 1
+                except sqlite3.IntegrityError:
+                    pass
+            conn.commit()
 
         for item in self.children:
             item.disabled = True
@@ -350,3 +346,4 @@ class BaseRoleSelectView(discord.ui.View):
         if not role:
             return await interaction.response.send_message("❌ Role not found!", ephemeral=True)
         await self.callback_func(interaction, role)
+                
