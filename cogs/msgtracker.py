@@ -74,7 +74,9 @@ class MsgTopPaginationView(discord.ui.View):
             start_rank = 11
 
         lines = []
-        for idx, (user_id, count) in enumerate(page_rows, start_rank):
+        for idx, item in enumerate(page_rows, start_rank):
+            user_id = item["_id"]
+            count = item["msg_count"]
             member = self.guild.get_member(user_id)
             name = member.display_name if member else f"User `{user_id}`"
             lines.append(f"**{idx}.** `{name[:15]}`: **{count}** msgs")
@@ -114,47 +116,41 @@ class MsgDropdownView(discord.ui.View):
 class MsgTracker(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.db = bot.db
-        self.init_db()
 
-    def init_db(self):
-        cursor = self.db.cursor()
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS message_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                guild_id INTEGER,
-                channel_id INTEGER,
-                user_id INTEGER,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        self.db.commit()
+    @property
+    def msg_col(self):
+        if getattr(self.bot, "async_db", None) is not None:
+            return self.bot.async_db["message_logs"]
+        return None
 
     @commands.Cog.listener()
     async def on_message(self, message):
-        if message.author.bot or not message.guild:
+        if message.author.bot or not message.guild or self.msg_col is None:
             return
 
-        cursor = self.db.cursor()
-        cursor.execute(
-            "INSERT INTO message_logs (guild_id, channel_id, user_id) VALUES (?, ?, ?)",
-            (message.guild.id, message.channel.id, message.author.id)
-        )
-        self.db.commit()
+        await self.msg_col.insert_one({
+            "guild_id": message.guild.id,
+            "channel_id": message.channel.id,
+            "user_id": message.author.id,
+            "timestamp": datetime.utcnow()
+        })
 
     async def get_msg_top_data(self, guild, author):
+        if self.msg_col is None:
+            embed = discord.Embed(title="Error", description="❌ Database connection error!", color=discord.Color.red())
+            return embed, MsgDropdownView(self.bot, author)
+
         time_24h_ago = datetime.utcnow() - timedelta(hours=24)
         
-        cursor = self.db.cursor()
-        cursor.execute('''
-            SELECT user_id, COUNT(*) as msg_count 
-            FROM message_logs 
-            WHERE guild_id = ? AND timestamp >= ? 
-            GROUP BY user_id 
-            ORDER BY msg_count DESC 
-            LIMIT 20
-        ''', (guild.id, time_24h_ago))
-        rows = cursor.fetchall()
+        pipeline = [
+            {"$match": {"guild_id": guild.id, "timestamp": {"$gte": time_24h_ago}}},
+            {"$group": {"_id": "$user_id", "msg_count": {"$sum": 1}}},
+            {"$sort": {"msg_count": -1}},
+            {"$limit": 20}
+        ]
+        
+        cursor = self.msg_col.aggregate(pipeline)
+        rows = await cursor.to_list(length=20)
 
         if not rows:
             embed = discord.Embed(
@@ -170,18 +166,21 @@ class MsgTracker(commands.Cog):
         return embed, view
 
     async def get_msgw_top_data(self, guild, author):
+        if self.msg_col is None:
+            embed = discord.Embed(title="Error", description="❌ Database connection error!", color=discord.Color.red())
+            return embed, MsgDropdownView(self.bot, author)
+
         time_7d_ago = datetime.utcnow() - timedelta(days=7)
         
-        cursor = self.db.cursor()
-        cursor.execute('''
-            SELECT user_id, COUNT(*) as msg_count 
-            FROM message_logs 
-            WHERE guild_id = ? AND timestamp >= ? 
-            GROUP BY user_id 
-            ORDER BY msg_count DESC 
-            LIMIT 10
-        ''', (guild.id, time_7d_ago))
-        rows = cursor.fetchall()
+        pipeline = [
+            {"$match": {"guild_id": guild.id, "timestamp": {"$gte": time_7d_ago}}},
+            {"$group": {"_id": "$user_id", "msg_count": {"$sum": 1}}},
+            {"$sort": {"msg_count": -1}},
+            {"$limit": 10}
+        ]
+        
+        cursor = self.msg_col.aggregate(pipeline)
+        rows = await cursor.to_list(length=10)
 
         embed = discord.Embed(
             title="⭐ Top Members Leaderboard (Weekly / 7 Days)",
@@ -192,7 +191,9 @@ class MsgTracker(commands.Cog):
             embed.description = "⚠️ Is week koi message record nahi mila."
         else:
             description_lines = []
-            for idx, (user_id, count) in enumerate(rows, 1):
+            for idx, item in enumerate(rows, 1):
+                user_id = item["_id"]
+                count = item["msg_count"]
                 member = guild.get_member(user_id)
                 name = member.mention if member else f"User `{user_id}`"
                 description_lines.append(f"**#{idx}** {name} — **{count}** Messages")
@@ -202,17 +203,20 @@ class MsgTracker(commands.Cog):
         return embed, MsgDropdownView(self.bot, author)
 
     async def get_msg_user_data(self, guild, target_user):
+        if self.msg_col is None:
+            embed = discord.Embed(title="Error", description="❌ Database connection error!", color=discord.Color.red())
+            return embed, MsgDropdownView(self.bot, target_user, target_user)
+
         time_24h_ago = datetime.utcnow() - timedelta(hours=24)
         
-        cursor = self.db.cursor()
-        cursor.execute('''
-            SELECT channel_id, COUNT(*) as msg_count 
-            FROM message_logs 
-            WHERE guild_id = ? AND user_id = ? AND timestamp >= ? 
-            GROUP BY channel_id 
-            ORDER BY msg_count DESC
-        ''', (guild.id, target_user.id, time_24h_ago))
-        rows = cursor.fetchall()
+        pipeline = [
+            {"$match": {"guild_id": guild.id, "user_id": target_user.id, "timestamp": {"$gte": time_24h_ago}}},
+            {"$group": {"_id": "$channel_id", "msg_count": {"$sum": 1}}},
+            {"$sort": {"msg_count": -1}}
+        ]
+        
+        cursor = self.msg_col.aggregate(pipeline)
+        rows = await cursor.to_list(length=None)
 
         embed = discord.Embed(
             title=f"📊 24h Message Breakdown — {target_user.display_name}",
@@ -220,13 +224,15 @@ class MsgTracker(commands.Cog):
         )
         embed.set_thumbnail(url=target_user.display_avatar.url)
 
-        total_24h = sum(count for _, count in rows)
+        total_24h = sum(item["msg_count"] for item in rows)
         
         if not rows:
             embed.description = "⚠️ Pichle 24 ghante me is user ne ek bhi message nahi bheja hai."
         else:
             channel_breakdown = []
-            for ch_id, count in rows:
+            for item in rows:
+                ch_id = item["_id"]
+                count = item["msg_count"]
                 ch = guild.get_channel(ch_id)
                 ch_name = ch.mention if ch else f"#deleted-channel"
                 channel_breakdown.append(f"• {ch_name}: **{count}** msgs")
@@ -239,22 +245,24 @@ class MsgTracker(commands.Cog):
         return embed, MsgDropdownView(self.bot, target_user, target_user)
 
     async def get_msgw_user_data(self, guild, target_user):
+        if self.msg_col is None:
+            embed = discord.Embed(title="Error", description="❌ Database connection error!", color=discord.Color.red())
+            return embed, MsgDropdownView(self.bot, target_user, target_user)
+
         time_24h_ago = datetime.utcnow() - timedelta(hours=24)
         time_7d_ago = datetime.utcnow() - timedelta(days=7)
 
-        cursor = self.db.cursor()
-        
-        cursor.execute('''
-            SELECT COUNT(*) FROM message_logs 
-            WHERE guild_id = ? AND user_id = ? AND timestamp >= ?
-        ''', (guild.id, target_user.id, time_24h_ago))
-        count_24h = cursor.fetchone()[0]
+        count_24h = await self.msg_col.count_documents({
+            "guild_id": guild.id,
+            "user_id": target_user.id,
+            "timestamp": {"$gte": time_24h_ago}
+        })
 
-        cursor.execute('''
-            SELECT COUNT(*) FROM message_logs 
-            WHERE guild_id = ? AND user_id = ? AND timestamp >= ?
-        ''', (guild.id, target_user.id, time_7d_ago))
-        count_7d = cursor.fetchone()[0]
+        count_7d = await self.msg_col.count_documents({
+            "guild_id": guild.id,
+            "user_id": target_user.id,
+            "timestamp": {"$gte": time_7d_ago}
+        })
 
         embed = discord.Embed(
             title=f"📈 Overview Stats — {target_user.display_name}",
@@ -312,4 +320,4 @@ class MsgTracker(commands.Cog):
 
 async def setup(bot):
     await bot.add_cog(MsgTracker(bot))
-            
+                                                      
