@@ -6,6 +6,7 @@ try:
 except ImportError:
     OWNER_ID = None
 
+
 class AutoResponder(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -56,7 +57,6 @@ class AutoResponder(commands.Cog):
         if self.responses_col is None:
             return await ctx.send("❌ Database connection error!")
 
-        # Agar bina kisi text ke sirf !autoresponse run karein, to full help menu show karega
         if content is None:
             embed = discord.Embed(
                 title="🤖 AutoResponder & Reaction Help System",
@@ -70,17 +70,17 @@ class AutoResponder(commands.Cog):
             )
             embed.add_field(
                 name="🎭 Auto Reaction Set Karein",
-                value="`!autoreaction trigger | emoji`\n*Example:* `!autoreaction thanks | ❤️`",
+                value="`!autorec <emoji> <trigger text>`\n*Example:* `!autorec ❤️ thanks`",
                 inline=False
             )
             embed.add_field(
-                name="🗑️ Trigger Delete Karein",
-                value="`!autodel trigger`\n*Example:* `!autodel hi`",
+                name="🗑️ Delete Commands",
+                value="`!autodel <trigger>` - Auto-Response remove karein.\n`!autorecdel <trigger>` - Auto-Reaction remove karein.",
                 inline=False
             )
             embed.add_field(
                 name="📋 All Triggers List",
-                value="`!autolist` - Server ke saare active auto-responses & reactions dikhayega.",
+                value="`!autolist` - Saare active auto-responses aur reactions dikhaega.",
                 inline=False
             )
             embed.set_footer(text=f"Requested by {ctx.author.display_name}", icon_url=ctx.author.display_avatar.url)
@@ -98,22 +98,37 @@ class AutoResponder(commands.Cog):
         )
         await ctx.send(f"✅ Set Auto-Response for `{trigger}`")
 
-    @commands.command(name="autoreaction")
-    async def auto_reaction(self, ctx, *, content: str = None):
+    @commands.command(name="autorec", aliases=["autoreaction"])
+    async def auto_reaction(self, ctx, emoji: str = None, *, trigger: str = None):
         if self.reactions_col is None:
             return await ctx.send("❌ Database connection error!")
 
-        if not content or "|" not in content:
-            return await ctx.send("❌ Usage: `!autoreaction trigger | emoji`")
-
-        trigger, emoji = [item.strip() for item in content.split("|", 1)]
+        if not emoji or not trigger:
+            return await ctx.send("❌ Usage: `!autorec <emoji> <trigger text>`\n*Example:* `!autorec ❤️ thanks`")
 
         await self.reactions_col.update_one(
             {"guild_id": ctx.guild.id, "trigger_text": trigger.lower()},
             {"$set": {"guild_id": ctx.guild.id, "trigger_text": trigger.lower(), "emoji": emoji}},
             upsert=True
         )
-        await ctx.send(f"✅ Set Auto-Reaction `{emoji}` for `{trigger}`")
+
+        await ctx.send(f"Confirm {emoji} {trigger}")
+
+    @commands.command(name="autorecdel")
+    async def auto_rec_del(self, ctx, *, trigger: str = None):
+        if self.reactions_col is None:
+            return await ctx.send("❌ Database connection error!")
+
+        if not trigger:
+            return await ctx.send("❌ Usage: `!autorecdel <trigger>`")
+
+        trig_lower = trigger.lower().strip()
+        result = await self.reactions_col.delete_one({"guild_id": ctx.guild.id, "trigger_text": trig_lower})
+
+        if result.deleted_count > 0:
+            await ctx.send(f"🗑️ Auto-Reaction trigger `{trigger}` delete kar diya gaya!")
+        else:
+            await ctx.send(f"⚠️ `{trigger}` naam ka koi Auto-Reaction nahi mila.")
 
     @commands.command(name="autodel")
     async def auto_del(self, ctx, *, trigger: str = None):
@@ -121,7 +136,7 @@ class AutoResponder(commands.Cog):
             return await ctx.send("❌ Database connection error!")
 
         if not trigger:
-            return await ctx.send("❌ Usage: `!autodel trigger`")
+            return await ctx.send("❌ Usage: `!autodel <trigger>`")
 
         trig_lower = trigger.lower().strip()
         res_del = await self.responses_col.delete_one({"guild_id": ctx.guild.id, "trigger_text": trig_lower})
@@ -137,11 +152,8 @@ class AutoResponder(commands.Cog):
         if self.responses_col is None or self.reactions_col is None:
             return await ctx.send("❌ Database connection error!")
 
-        res_cursor = self.responses_col.find({"guild_id": ctx.guild.id})
-        rec_cursor = self.reactions_col.find({"guild_id": ctx.guild.id})
-
-        responses = await res_cursor.to_list(length=None)
-        reactions = await rec_cursor.to_list(length=None)
+        responses = await self.responses_col.find({"guild_id": ctx.guild.id}).to_list(length=None)
+        reactions = await self.reactions_col.find({"guild_id": ctx.guild.id}).to_list(length=None)
 
         if not responses and not reactions:
             return await ctx.send("📑 Is server me koi Auto-Response ya Reaction set nahi hai!")
@@ -150,14 +162,14 @@ class AutoResponder(commands.Cog):
 
         if responses:
             res_text = "\n".join([f"• `{r['trigger_text']}` ➔ {r['response_text']}" for r in responses])
-            embed.add_field(name="💬 Auto Responses", value=res_text[:1024], inline=False)
+            embed.add_field(name="💬 Auto Responses (!autoadd / !autoresponse)", value=res_text[:1024], inline=False)
 
         if reactions:
             rec_text = "\n".join([f"• `{r['trigger_text']}` ➔ {r['emoji']}" for r in reactions])
-            embed.add_field(name="🎭 Auto Reactions", value=rec_text[:1024], inline=False)
+            embed.add_field(name="🎭 Auto Reactions (!autorec)", value=rec_text[:1024], inline=False)
 
         await ctx.send(embed=embed)
 
 async def setup(bot):
     await bot.add_cog(AutoResponder(bot))
-        
+    
