@@ -5,9 +5,10 @@ from flask import Flask
 import discord
 from discord.ext import commands
 from pymongo import MongoClient
+from motor.motor_asyncio import AsyncIOMotorClient
 import config
 
-# --- Keep Alive Flask Server (Non-blocking) ---
+# --- Keep Alive Flask Server ---
 app = Flask('')
 
 @app.route('/')
@@ -26,18 +27,24 @@ def keep_alive():
 keep_alive()
 # -------------------------------
 
-# --- MongoDB Setup & ALL FEATURES Data Recovery ---
 MONGO_URI = os.getenv('MONGO_URI', getattr(config, 'MONGO_URI', None))
 db = None
+async_db = None
 
 if MONGO_URI:
     try:
+        # Sync MongoClient for backup/recovery
         cluster = MongoClient(MONGO_URI)
         db = cluster['javer_database']
+        
+        # Async Motor Client for Async Cogs (Welcome, etc.)
+        motor_client = AsyncIOMotorClient(MONGO_URI)
+        async_db = motor_client['javer_database']
+        
         print('[MongoDB] Successfully connected to javer_database!')
 
         storage_collections = [
-            'welcome_setup', 'welcome', 
+            'welcome_setup', 'welcome', 'welcome_settings',
             'mod_logs', 'modlogs', 'logs',
             'msg_tracker', 'msgtracker', 'messages',
             'vc_tracker', 'vctracker', 'voice_time',
@@ -61,18 +68,19 @@ if MONGO_URI:
         print(f'[MongoDB Connection Error]: {e}')
 else:
     print('[MongoDB Warning] MONGO_URI variable missing in environment!')
-# --------------------------------------------------
 
+# Enable Intents
 intents = discord.Intents.default()
 intents.message_content = True
-intents.members = True
+intents.members = True  # Required for welcome system
 intents.voice_states = True
 intents.presences = False
 
 PREFIXES = commands.when_mentioned_or('.', ',', '-', '?', '$', ';', '/', ':', "'", '!')
 
 bot = commands.Bot(command_prefix=PREFIXES, intents=intents, help_command=None)
-bot.db = db  # Global database instance bound to bot
+bot.db = db
+bot.async_db = async_db  # Pass async database to cogs
 
 @bot.event
 async def on_ready():
