@@ -1,282 +1,348 @@
 import discord
 from discord.ext import commands
 import datetime
+import re
 import asyncio
 
 class AntiNuke(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.spam_tracker = {}  # {guild_id: {user_id: [timestamps]}}
-        self.dup_tracker = {}   # {guild_id: {user_id: {"last_msg": str, "count": int}}}
+        self.ban_tracker = {}   # {guild_id: {user_id: [timestamps]}}
+        self.url_regex = re.compile(r'https?://[^\s]+|discord\.gg/[^\s]+|discord\.com/invite/[^\s]+')
 
-    # Helper: Get Server Config
-    def get_config(self, guild_id):
-        if self.bot.db is None:
+    @property
+    def db(self):
+        return getattr(self.bot, "async_db", None)
+
+    @property
+    def config_col(self):
+        return self.db["antinuke_config"] if self.db is not None else None
+
+    # Helper: Fetch Guild Config from MongoDB
+    async def get_config(self, guild_id):
+        if self.config_col is None:
             return None
-        db = self.bot.db['antinuke_config']
-        config = db.find_one({"guild_id": str(guild_id)})
+        config = await self.config_col.find_one({"guild_id": str(guild_id)})
         if not config:
             config = {
                 "guild_id": str(guild_id),
-                "enabled": False,
                 "whitelist": [],
-                "bot_whitelist": [],
-                "anti_bot": {"enabled": True, "action": "ban"},
-                "spam": {"enabled": True, "timeout_limit": 5, "timeout_duration": 5, "ban_limit": 10},
-                "dup_spam": {"enabled": True, "limit": 3, "action": "timeout", "duration": 10},
-                "mass_ping": {"enabled": True, "limit": 5, "action": "timeout", "duration": 15},
-                "links": {"enabled": True, "allow_discord": False, "action": "timeout", "duration": 5},
-                "channel_create": {"enabled": True, "limit": 3, "action": "timeout", "duration": 15},
-                "channel_delete": {"enabled": True, "limit": 2, "action": "ban", "duration": 0},
-                "role_delete": {"enabled": True, "limit": 2, "action": "ban", "duration": 0},
-                "mass_ban": {"enabled": True, "limit": 3, "action": "ban", "duration": 0},
-                "mass_kick": {"enabled": True, "limit": 3, "action": "ban", "duration": 0},
-                "webhook_create": {"enabled": True, "action": "ban"}
+                "log_channel_id": None,
+                "spam": {"amount": 5, "action": "timeout", "duration": "5m"},
+                "url": {"enabled": False, "action": "timeout", "duration": "5m"},
+                "ban_protect": {"amount": 2, "action": "timeout", "duration": "1m"},
+                "app": {"enabled": False}
             }
-            db.insert_one(config)
+            await self.config_col.insert_one(config)
         return config
 
-    def update_config(self, guild_id, data):
-        if self.bot.db is not None:
-            db = self.bot.db['antinuke_config']
-            db.update_one({"guild_id": str(guild_id)}, {"$set": data}, upsert=True)
+    # Helper: Parse Duration String into Seconds
+    def parse_duration(self, duration_str: str) -> int:
+        if not duration_str:
+            return 300  # Default 5m
+        match = re.match(r"^(\d+)(s|m|d|w|month)$", str(duration_str).lower().strip())
+        if not match:
+            return 300
+        val, unit = int(match.group(1)), match.group(2)
+        if unit == "s": return val
+        elif unit == "m": return val * 60
+        elif unit == "d": return val * 86400
+        elif unit == "w": return val * 604800
+        elif unit == "month": return val * 2592000
+        return 300
 
-    def is_whitelisted(self, guild, user_id):
-        if user_id == guild.owner_id or user_id == self.bot.user.id:
+    # Helper: Check Whitelist / Owner
+    async def is_whitelisted(self, guild, user_id):
+        if user_id == guild.owner_id:
             return True
-        config = self.get_config(guild.id)
+        config = await self.get_config(guild.id)
         if config and str(user_id) in config.get("whitelist", []):
             return True
         return False
 
-    async def apply_punishment(self, guild, member, action, duration=0, reason="Anti-Nuke Protection Triggered"):
+    # Helper: Send Audit Logs
+    async def send_log(self, guild, embed):
+        config = await self.get_config(guild.id)
+        if config and config.get("log_channel_id"):
+            channel = guild.get_channel(int(config["log_channel_id"]))
+            if channel:
+                try:
+                    await channel.send(embed=embed)
+                except Exception:
+                    pass
+
+    # Helper: Apply Punishment
+    async def apply_punishment(self, guild, member, action, duration_str="5m", reason="AntiNuke Security Triggered"):
         try:
-            if action == "timeout" and duration > 0:
-                until = discord.utils.utcnow() + datetime.timedelta(minutes=duration)
+            sec = self.parse_duration(duration_str)
+            if action == "timeout":
+                until = discord.utils.utcnow() + datetime.timedelta(seconds=sec)
                 await member.timeout(until, reason=reason)
-            elif action == "kick":
-                await member.kick(reason=reason)
             elif action == "ban":
                 await member.ban(reason=reason)
-            elif action == "strip_roles":
-                roles_to_remove = [r for r in member.roles if r != guild.default_role and not r.managed]
-                await member.remove_roles(*roles_to_remove, reason=reason)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Punishment Error: {e}")
 
     # ---------------- EVENT LISTENERS ----------------
 
-    # 1. Anti-Bot Join & Whitelist System
+    # 1. Anti App / Bot Add
     @commands.Cog.listener()
     async def on_member_join(self, member):
+        if not member.bot or not member.guild:
+            return
         guild = member.guild
-        config = self.get_config(guild.id)
-        if not config or not config.get("enabled", False):
+        config = await self.get_config(guild.id)
+        if not config or not config.get("app", {}).get("enabled", False):
             return
 
-        if member.bot:
-            async for entry in guild.audit_logs(action=discord.AuditLogAction.BOT_ADD, limit=1):
-                inviter = entry.user
-                if not self.is_whitelisted(guild, inviter.id):
-                    # Kick unauthorized bot
-                    await member.kick(reason="[ANTI-NUKE] Unauthorized bot joined.")
-                    # Punish the inviter
-                    await self.apply_punishment(guild, inviter, config["anti_bot"]["action"], reason="Added unauthorized bot to server.")
-                    break
+        async for entry in guild.audit_logs(action=discord.AuditLogAction.BOT_ADD, limit=1):
+            inviter = entry.user
+            if not await self.is_whitelisted(guild, inviter.id):
+                # Kick unauthorized bot
+                await member.kick(reason="AntiNuke: Unauthorized bot added")
+                
+                embed = discord.Embed(
+                    title="AntiNuke Action: Unauthorized Bot Kicked",
+                    description=f"Bot: {member.mention} ({member.id})\nAdded By: {inviter.mention} ({inviter.id})\nAction: Bot Kicked",
+                    color=discord.Color.red()
+                )
+                await self.send_log(guild, embed)
+                break
 
-    # 2. Anti-Spam & Chat Protection
+    # 2. Anti Spam & Anti URL
     @commands.Cog.listener()
     async def on_message(self, message):
         if not message.guild or message.author.bot:
             return
         guild = message.guild
-        config = self.get_config(guild.id)
-        if not config or not config.get("enabled", False) or self.is_whitelisted(guild, message.author.id):
+        if await self.is_whitelisted(guild, message.author.id):
+            return
+
+        config = await self.get_config(guild.id)
+        if not config:
             return
 
         now = datetime.datetime.utcnow().timestamp()
         uid = str(message.author.id)
         gid = str(guild.id)
 
-        # Chat Spam
-        if config["spam"]["enabled"]:
+        # Anti URL
+        if config.get("url", {}).get("enabled", False):
+            if self.url_regex.search(message.content):
+                try:
+                    await message.delete()
+                except Exception:
+                    pass
+                action = config["url"].get("action", "timeout")
+                dur = config["url"].get("duration", "5m")
+                await self.apply_punishment(guild, message.author, action, dur, "AntiNuke: Unauthorized URL")
+                
+                embed = discord.Embed(
+                    title="AntiNuke Action: URL Blocked",
+                    description=f"User: {message.author.mention}\nAction: {action.upper()} ({dur})\nContent: `{message.content[:200]}`",
+                    color=discord.Color.orange()
+                )
+                await self.send_log(guild, embed)
+                return
+
+        # Anti Spam
+        spam_cfg = config.get("spam", {})
+        limit = spam_cfg.get("amount", 5)
+        if limit > 0:
             if gid not in self.spam_tracker: self.spam_tracker[gid] = {}
             if uid not in self.spam_tracker[gid]: self.spam_tracker[gid][uid] = []
-            
+
             self.spam_tracker[gid][uid] = [t for t in self.spam_tracker[gid][uid] if now - t < 5]
             self.spam_tracker[gid][uid].append(now)
 
-            msg_count = len(self.spam_tracker[gid][uid])
-            if msg_count >= config["spam"]["ban_limit"]:
-                await message.channel.purge(limit=msg_count, check=lambda m: m.author == message.author)
-                await self.apply_punishment(guild, message.author, "ban", reason="Automated Chat Spam (Ban Limit)")
-                return
-            elif msg_count >= config["spam"]["timeout_limit"]:
-                await message.channel.purge(limit=msg_count, check=lambda m: m.author == message.author)
-                await self.apply_punishment(guild, message.author, "timeout", config["spam"]["timeout_duration"], reason="Automated Chat Spam")
-                return
+            if len(self.spam_tracker[gid][uid]) >= limit:
+                self.spam_tracker[gid][uid] = []
+                action = spam_cfg.get("action", "timeout")
+                dur = spam_cfg.get("duration", "5m")
+                await self.apply_punishment(guild, message.author, action, dur, "AntiNuke: Message Spam")
 
-        # Links & Invites
-        if config["links"]["enabled"]:
-            content = message.content.lower()
-            if "discord.gg/" in content or "discord.com/invite/" in content or "http://" in content or "https://" in content:
-                await message.delete()
-                await self.apply_punishment(guild, message.author, config["links"]["action"], config["links"]["duration"], reason="Unauthorized Link Sharing")
-                return
+                embed = discord.Embed(
+                    title="AntiNuke Action: Spam Detected",
+                    description=f"User: {message.author.mention}\nAction: {action.upper()} ({dur})\nTrigger: Sent {limit} messages in 5 seconds",
+                    color=discord.Color.red()
+                )
+                await self.send_log(guild, embed)
 
-        # Mass Pings
-        if config["mass_ping"]["enabled"]:
-            if len(message.mentions) >= config["mass_ping"]["limit"] or message.mention_everyone:
-                await message.delete()
-                await self.apply_punishment(guild, message.author, config["mass_ping"]["action"], config["mass_ping"]["duration"], reason="Mass Mention Spam")
+    # 3. Anti Mass Ban
+    @commands.Cog.listener()
+    async def on_member_ban(self, guild, user):
+        async for entry in guild.audit_logs(action=discord.AuditLogAction.BAN, limit=1):
+            executor = entry.user
+            if executor.bot or await self.is_whitelisted(guild, executor.id):
                 return
 
-    # 3. Channel Protection
-    @commands.Cog.listener()
-    async def on_guild_channel_delete(self, channel):
-        guild = channel.guild
-        config = self.get_config(guild.id)
-        if not config or not config.get("enabled", False): return
+            config = await self.get_config(guild.id)
+            if not config: return
 
-        async for entry in guild.audit_logs(action=discord.AuditLogAction.CHANNEL_DELETE, limit=1):
-            executor = entry.user
-            if self.is_whitelisted(guild, executor.id): return
+            ban_cfg = config.get("ban_protect", {})
+            limit = ban_cfg.get("amount", 2)
+            now = datetime.datetime.utcnow().timestamp()
+            gid, uid = str(guild.id), str(executor.id)
 
-            await self.apply_punishment(guild, executor, config["channel_delete"]["action"], config["channel_delete"]["duration"], reason="Unauthorized Channel Delete")
-            await channel.clone(reason="[ANTI-NUKE] Auto-restored deleted channel.")
+            if gid not in self.ban_tracker: self.ban_tracker[gid] = {}
+            if uid not in self.ban_tracker[gid]: self.ban_tracker[gid][uid] = []
 
-    @commands.Cog.listener()
-    async def on_guild_channel_create(self, channel):
-        guild = channel.guild
-        config = self.get_config(guild.id)
-        if not config or not config.get("enabled", False): return
+            self.ban_tracker[gid][uid] = [t for t in self.ban_tracker[gid][uid] if now - t < 60]
+            self.ban_tracker[gid][uid].append(now)
 
-        async for entry in guild.audit_logs(action=discord.AuditLogAction.CHANNEL_CREATE, limit=1):
-            executor = entry.user
-            if self.is_whitelisted(guild, executor.id): return
+            if len(self.ban_tracker[gid][uid]) >= limit:
+                self.ban_tracker[gid][uid] = []
+                action = ban_cfg.get("action", "timeout")
+                dur = ban_cfg.get("duration", "1m")
+                await self.apply_punishment(guild, executor, action, dur, "AntiNuke: Mass Ban Limit Reached")
 
-            await channel.delete(reason="[ANTI-NUKE] Unauthorized channel creation.")
-            await self.apply_punishment(guild, executor, config["channel_create"]["action"], config["channel_create"]["duration"], reason="Mass Channel Creation")
-
-    # 4. Role & Webhook Protection
-    @commands.Cog.listener()
-    async def on_guild_role_delete(self, role):
-        guild = role.guild
-        config = self.get_config(guild.id)
-        if not config or not config.get("enabled", False): return
-
-        async for entry in guild.audit_logs(action=discord.AuditLogAction.ROLE_DELETE, limit=1):
-            executor = entry.user
-            if self.is_whitelisted(guild, executor.id): return
-            await self.apply_punishment(guild, executor, config["role_delete"]["action"], config["role_delete"]["duration"], reason="Unauthorized Role Delete")
-
-    @commands.Cog.listener()
-    async def on_webhooks_update(self, channel):
-        guild = channel.guild
-        config = self.get_config(guild.id)
-        if not config or not config.get("enabled", False): return
-
-        async for entry in guild.audit_logs(action=discord.AuditLogAction.WEBHOOK_CREATE, limit=1):
-            executor = entry.user
-            if self.is_whitelisted(guild, executor.id): return
-            await self.apply_punishment(guild, executor, config["webhook_create"]["action"], reason="Unauthorized Webhook Creation")
+                embed = discord.Embed(
+                    title="AntiNuke Action: Mass Ban Detected",
+                    description=f"Executor: {executor.mention}\nAction: {action.upper()} ({dur})\nTrigger: Banned {limit} members in 60s",
+                    color=discord.Color.dark_red()
+                )
+                await self.send_log(guild, embed)
 
     # ---------------- COMMANDS ----------------
 
-    @commands.group(name="antinuke", aliases=["protect"], invoke_without_command=True)
-    async def antinuke(self, ctx):
+    @commands.group(name="antinuke", aliases=["nuke"], invoke_without_command=True)
+    async def antinuke_group(self, ctx):
         embed = discord.Embed(
-            title="🛡️ Server Anti-Nuke & Protection Framework",
-            description="Complete system configuration menu for server security.",
-            color=0x2ECC71
+            title="AntiNuke System Commands & Help",
+            description="Manage server security filters and punishments easily.",
+            color=discord.Color.blue()
         )
-        embed.add_field(
-            name="⚙️ System Controls",
-            value="`!antinuke enable` - Turn ON anti-nuke protection\n"
-                  "`!antinuke disable` - Turn OFF anti-nuke protection\n"
-                  "`!antinuke settings` - View current security thresholds",
-            inline=False
-        )
-        embed.add_field(
-            name="👑 Whitelist Commands",
-            value="`!antinuke whitelist @user` - Whitelist an admin/bot\n"
-                  "`!antinuke unwhitelist @user` - Remove from whitelist",
-            inline=False
-        )
-        embed.add_field(
-            name="🛠️ Protection Configurations",
-            value="`!antinuke setspam <timeout_limit> <ban_limit> <timeout_mins>`\n"
-                  "`!antinuke setbot <action>` - (Action: kick/ban/timeout)\n"
-                  "`!antinuke setchannel <create_limit> <action> <duration_mins>`\n"
-                  "`!antinuke setlink <action> <duration_mins>`",
-            inline=False
-        )
+        embed.add_field(name="Spam Filter", value="`!nuke spam <amount> <ban/timeout> [duration]`\nExample: `!nuke spam 5 timeout 5m`", inline=False)
+        embed.add_field(name="URL Protection", value="`!nuke url <on/off>`\n`!nuke url action <ban/timeout> [duration]`\nExample: `!nuke url action timeout 10m`", inline=False)
+        embed.add_field(name="Ban Protection", value="`!nuke ban <amount> <ban/timeout> [duration]`\nExample: `!nuke ban 2 timeout 1m`", inline=False)
+        embed.add_field(name="App Protection", value="`!nuke app <on/off>`", inline=False)
+        embed.add_field(name="Whitelist Management", value="`!nuke whitelist @user`\n`!nuke whitelistuser`", inline=False)
+        embed.add_field(name="Logs & Overview", value="`!nuke logs #channel`\n`!nuke list`", inline=False)
         await ctx.send(embed=embed)
 
-    @antinuke.command(name="enable", aliases=["on"])
-    async def enable_system(self, ctx):
-        if ctx.author.id != ctx.guild.owner_id:
-            return await ctx.send("❌ Only the **Server Owner** can toggle Anti-Nuke system!")
-        self.update_config(ctx.guild.id, {"enabled": True})
-        await ctx.send("✅ **Anti-Nuke Protection Framework is now ACTIVE!**")
+    @antinuke_group.command(name="spam")
+    @commands.has_permissions(administrator=True)
+    async def set_spam(self, ctx, amount: int, action: str, duration: str = "5m"):
+        if action.lower() not in ["ban", "timeout"]:
+            return await ctx.send("Invalid action! Choose `ban` or `timeout`.")
+        await self.config_col.update_one(
+            {"guild_id": str(ctx.guild.id)},
+            {"$set": {"spam": {"amount": amount, "action": action.lower(), "duration": duration}}},
+            upsert=True
+        )
+        await ctx.send(f"Spam filter configured: {amount} messages trigger **{action.lower()}** ({duration}).")
 
-    @antinuke.command(name="disable", aliases=["off"])
-    async def disable_system(self, ctx):
-        if ctx.author.id != ctx.guild.owner_id:
-            return await ctx.send("❌ Only the **Server Owner** can toggle Anti-Nuke system!")
-        self.update_config(ctx.guild.id, {"enabled": False})
-        await ctx.send("⚠️ **Anti-Nuke Protection Framework has been DISABLED!**")
+    @antinuke_group.group(name="url", invoke_without_command=True)
+    @commands.has_permissions(administrator=True)
+    async def url_group(self, ctx, status: str = None):
+        if status and status.lower() in ["on", "off"]:
+            enabled = status.lower() == "on"
+            await self.config_col.update_one(
+                {"guild_id": str(ctx.guild.id)},
+                {"$set": {"url.enabled": enabled}},
+                upsert=True
+            )
+            return await ctx.send(f"URL Protection is now **{'ENABLED' if enabled else 'DISABLED'}**.")
+        await ctx.send("Usage: `!nuke url <on/off>` or `!nuke url action <ban/timeout> [duration]`")
 
-    @antinuke.command(name="whitelist", aliases=["wl"])
-    async def whitelist_user(self, ctx, member: discord.Member):
-        if ctx.author.id != ctx.guild.owner_id:
-            return await ctx.send("❌ Only the **Server Owner** can manage whitelist!")
-        config = self.get_config(ctx.guild.id)
+    @url_group.command(name="action")
+    @commands.has_permissions(administrator=True)
+    async def set_url_action(self, ctx, action: str, duration: str = "5m"):
+        if action.lower() not in ["ban", "timeout"]:
+            return await ctx.send("Invalid action! Choose `ban` or `timeout`.")
+        await self.config_col.update_one(
+            {"guild_id": str(ctx.guild.id)},
+            {"$set": {"url.action": action.lower(), "url.duration": duration}},
+            upsert=True
+        )
+        await ctx.send(f"URL Protection action configured: **{action.lower()}** ({duration}).")
+
+    @antinuke_group.command(name="ban")
+    @commands.has_permissions(administrator=True)
+    async def set_ban_protect(self, ctx, amount: int, action: str, duration: str = "1m"):
+        if action.lower() not in ["ban", "timeout"]:
+            return await ctx.send("Invalid action! Choose `ban` or `timeout`.")
+        await self.config_col.update_one(
+            {"guild_id": str(ctx.guild.id)},
+            {"$set": {"ban_protect": {"amount": amount, "action": action.lower(), "duration": duration}}},
+            upsert=True
+        )
+        await ctx.send(f"Ban protection configured: {amount} bans trigger **{action.lower()}** ({duration}).")
+
+    @antinuke_group.command(name="app")
+    @commands.has_permissions(administrator=True)
+    async def set_app_protect(self, ctx, status: str):
+        if status.lower() not in ["on", "off"]:
+            return await ctx.send("Usage: `!nuke app <on/off>`")
+        enabled = status.lower() == "on"
+        await self.config_col.update_one(
+            {"guild_id": str(ctx.guild.id)},
+            {"$set": {"app.enabled": enabled}},
+            upsert=True
+        )
+        await ctx.send(f"App/Bot Protection is now **{'ENABLED' if enabled else 'DISABLED'}**.")
+
+    @antinuke_group.command(name="whitelist")
+    @commands.has_permissions(administrator=True)
+    async def toggle_whitelist(self, ctx, member: discord.Member):
+        config = await self.get_config(ctx.guild.id)
         wl = config.get("whitelist", [])
-        if str(member.id) not in wl:
-            wl.append(str(member.id))
-            self.update_config(ctx.guild.id, {"whitelist": wl})
-        await ctx.send(f"✅ **{member.display_name}** is now whitelisted and will bypass security checks.")
+        mid = str(member.id)
+        if mid in wl:
+            wl.remove(mid)
+            msg = f"{member.mention} removed from AntiNuke whitelist."
+        else:
+            wl.append(mid)
+            msg = f"{member.mention} added to AntiNuke whitelist."
+        await self.config_col.update_one({"guild_id": str(ctx.guild.id)}, {"$set": {"whitelist": wl}}, upsert=True)
+        await ctx.send(msg)
 
-    @antinuke.command(name="unwhitelist", aliases=["unwl"])
-    async def unwhitelist_user(self, ctx, member: discord.Member):
-        if ctx.author.id != ctx.guild.owner_id:
-            return await ctx.send("❌ Only the **Server Owner** can manage whitelist!")
-        config = self.get_config(ctx.guild.id)
+    @commands.command(name="whitelistuser", aliases=["auntinuke_whitelistuser"])
+    @commands.has_permissions(administrator=True)
+    async def list_whitelisted_users(self, ctx):
+        config = await self.get_config(ctx.guild.id)
         wl = config.get("whitelist", [])
-        if str(member.id) in wl:
-            wl.remove(str(member.id))
-            self.update_config(ctx.guild.id, {"whitelist": wl})
-        await ctx.send(f"⚠️ **{member.display_name}** removed from whitelist.")
+        if not wl:
+            return await ctx.send("No users are currently whitelisted.")
+        users_str = "\n".join([f"• <@{uid}> (`{uid}`)" for uid in wl])
+        embed = discord.Embed(title="Whitelisted Users", description=users_str, color=discord.Color.green())
+        await ctx.send(embed=embed)
 
-    @antinuke.command(name="setspam")
-    async def config_spam(self, ctx, timeout_limit: int, ban_limit: int, timeout_mins: int):
-        if ctx.author.id != ctx.guild.owner_id: return
-        self.update_config(ctx.guild.id, {
-            "spam.timeout_limit": timeout_limit,
-            "spam.ban_limit": ban_limit,
-            "spam.timeout_duration": timeout_mins
-        })
-        await ctx.send(f"✅ **Spam Configured:** `{timeout_limit}` msgs = `{timeout_mins}m` Timeout | `{ban_limit}` msgs = Ban.")
+    @antinuke_group.command(name="logs")
+    @commands.has_permissions(administrator=True)
+    async def set_logs_channel(self, ctx, channel: discord.TextChannel):
+        await self.config_col.update_one(
+            {"guild_id": str(ctx.guild.id)},
+            {"$set": {"log_channel_id": str(channel.id)}},
+            upsert=True
+        )
+        await ctx.send(f"AntiNuke log channel set to {channel.mention}.")
 
-    @antinuke.command(name="setbot")
-    async def config_bot(self, ctx, action: str):
-        if ctx.author.id != ctx.guild.owner_id: return
-        if action not in ["kick", "ban", "timeout"]:
-            return await ctx.send("❌ Invalid Action! Choose: `kick`, `ban`, or `timeout`.")
-        self.update_config(ctx.guild.id, {"anti_bot.action": action})
-        await ctx.send(f"✅ **Anti-Bot Action Updated:** Inviter will face `{action}` for unauthorized bot additions.")
+    @antinuke_group.command(name="list")
+    @commands.has_permissions(administrator=True)
+    async def show_list_setup(self, ctx):
+        c = await self.get_config(ctx.guild.id)
+        embed = discord.Embed(title=f"AntiNuke Active Configuration - {ctx.guild.name}", color=discord.Color.gold())
+        
+        spam = c.get("spam", {})
+        embed.add_field(name="Spam Filter", value=f"Limit: `{spam.get('amount', 5)}`\nAction: `{spam.get('action', 'timeout').upper()}`\nDuration: `{spam.get('duration', '5m')}`", inline=True)
+        
+        url = c.get("url", {})
+        embed.add_field(name="URL Protection", value=f"Status: `{ 'ENABLED' if url.get('enabled') else 'DISABLED' }`\nAction: `{url.get('action', 'timeout').upper()}`\nDuration: `{url.get('duration', '5m')}`", inline=True)
+        
+        ban = c.get("ban_protect", {})
+        embed.add_field(name="Ban Protection", value=f"Limit: `{ban.get('amount', 2)}`\nAction: `{ban.get('action', 'timeout').upper()}`\nDuration: `{ban.get('duration', '1m')}`", inline=True)
+        
+        app = c.get("app", {})
+        embed.add_field(name="App Protection", value=f"Status: `{ 'ENABLED' if app.get('enabled') else 'DISABLED' }`", inline=True)
+        
+        log_ch = f"<#{c.get('log_channel_id')}>" if c.get('log_channel_id') else "Not Set"
+        embed.add_field(name="Log Channel", value=log_ch, inline=True)
+        embed.add_field(name="Whitelisted Users", value=f"`{len(c.get('whitelist', []))}` Members", inline=True)
 
-    @antinuke.command(name="settings", aliases=["config"])
-    async def view_settings(self, ctx):
-        config = self.get_config(ctx.guild.id)
-        embed = discord.Embed(title=f"🛡️ Security Settings - {ctx.guild.name}", color=0x3498DB)
-        embed.add_field(name="System Status", value=f"`{'ENABLED' if config['enabled'] else 'DISABLED'}`", inline=False)
-        embed.add_field(name="Spam Thresholds", value=f"Timeout: `{config['spam']['timeout_limit']} msgs` | Ban: `{config['spam']['ban_limit']} msgs`", inline=True)
-        embed.add_field(name="Anti-Bot Action", value=f"`{config['anti_bot']['action'].upper()}`", inline=True)
-        embed.add_field(name="Whitelisted Users", value=f"`{len(config.get('whitelist', []))}` Members", inline=True)
         await ctx.send(embed=embed)
 
 async def setup(bot):
     await bot.add_cog(AntiNuke(bot))
-          
+            
