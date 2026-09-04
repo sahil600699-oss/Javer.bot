@@ -99,7 +99,6 @@ class AntiNuke(commands.Cog):
         async for entry in guild.audit_logs(action=discord.AuditLogAction.BOT_ADD, limit=1):
             inviter = entry.user
             if not await self.is_whitelisted(guild, inviter.id):
-                # Kick unauthorized bot
                 await member.kick(reason="AntiNuke: Unauthorized bot added")
                 
                 embed = discord.Embed(
@@ -148,7 +147,7 @@ class AntiNuke(commands.Cog):
 
         # Anti Spam
         spam_cfg = config.get("spam", {})
-        limit = spam_cfg.get("amount", 5)
+        limit = spam_cfg.get("amount", 0)
         if limit > 0:
             if gid not in self.spam_tracker: self.spam_tracker[gid] = {}
             if uid not in self.spam_tracker[gid]: self.spam_tracker[gid][uid] = []
@@ -181,7 +180,9 @@ class AntiNuke(commands.Cog):
             if not config: return
 
             ban_cfg = config.get("ban_protect", {})
-            limit = ban_cfg.get("amount", 2)
+            limit = ban_cfg.get("amount", 0)
+            if limit <= 0: return
+
             now = datetime.datetime.utcnow().timestamp()
             gid, uid = str(guild.id), str(executor.id)
 
@@ -213,14 +214,14 @@ class AntiNuke(commands.Cog):
             description="Manage server security filters and punishments easily.",
             color=discord.Color.blue()
         )
-        embed.add_field(name="Spam Filter", value="`!nuke spam <amount> <ban/timeout> [duration]`\nExample: `!nuke spam 5 timeout 5m`", inline=False)
-        embed.add_field(name="URL Protection", value="`!nuke url <on/off>`\n`!nuke url action <ban/timeout> [duration]`\nExample: `!nuke url action timeout 10m`", inline=False)
-        embed.add_field(name="Ban Protection", value="`!nuke ban <amount> <ban/timeout> [duration]`\nExample: `!nuke ban 2 timeout 1m`", inline=False)
-        embed.add_field(name="App Protection", value="`!nuke app <on/off>`", inline=False)
-        embed.add_field(name="Whitelist Management", value="`!nuke whitelist @user`\n`!nuke whitelistuser`", inline=False)
-        embed.add_field(name="Logs & Overview", value="`!nuke logs #channel`\n`!nuke list`", inline=False)
+        embed.add_field(name="Spam Filter Setup & Delete", value="`!nuke spam <amount> <ban/timeout> [duration]`\n`!nuke spamdel` - Delete spam filter", inline=False)
+        embed.add_field(name="URL Protection Setup & Delete", value="`!nuke url <on/off>`\n`!nuke urldel` - Disable and delete URL filter", inline=False)
+        embed.add_field(name="Ban Protection Setup & Delete", value="`!nuke ban <amount> <ban/timeout> [duration]`\n`!nuke bandel` - Delete ban filter", inline=False)
+        embed.add_field(name="Whitelist Commands", value="`!nuke whitelist @user`\n`!nuke unwhitelist @user`\n`!nuke whitelistuser`", inline=False)
+        embed.add_field(name="Logs & Reset", value="`!nuke logs #channel`\n`!nuke logsdel` - Delete log channel\n`!nuke resetall` - Clear all configs", inline=False)
         await ctx.send(embed=embed)
 
+    # --- SPAM COMMANDS ---
     @antinuke_group.command(name="spam")
     @commands.has_permissions(administrator=True)
     async def set_spam(self, ctx, amount: int, action: str, duration: str = "5m"):
@@ -233,6 +234,17 @@ class AntiNuke(commands.Cog):
         )
         await ctx.send(f"Spam filter configured: {amount} messages trigger **{action.lower()}** ({duration}).")
 
+    @antinuke_group.command(name="spamdel")
+    @commands.has_permissions(administrator=True)
+    async def delete_spam(self, ctx):
+        await self.config_col.update_one(
+            {"guild_id": str(ctx.guild.id)},
+            {"$set": {"spam.amount": 0}},
+            upsert=True
+        )
+        await ctx.send("Spam filter has been removed and disabled.")
+
+    # --- URL COMMANDS ---
     @antinuke_group.group(name="url", invoke_without_command=True)
     @commands.has_permissions(administrator=True)
     async def url_group(self, ctx, status: str = None):
@@ -258,6 +270,17 @@ class AntiNuke(commands.Cog):
         )
         await ctx.send(f"URL Protection action configured: **{action.lower()}** ({duration}).")
 
+    @antinuke_group.command(name="urldel")
+    @commands.has_permissions(administrator=True)
+    async def delete_url(self, ctx):
+        await self.config_col.update_one(
+            {"guild_id": str(ctx.guild.id)},
+            {"$set": {"url.enabled": False}},
+            upsert=True
+        )
+        await ctx.send("URL Protection filter has been removed and disabled.")
+
+    # --- BAN PROTECTION COMMANDS ---
     @antinuke_group.command(name="ban")
     @commands.has_permissions(administrator=True)
     async def set_ban_protect(self, ctx, amount: int, action: str, duration: str = "1m"):
@@ -270,6 +293,17 @@ class AntiNuke(commands.Cog):
         )
         await ctx.send(f"Ban protection configured: {amount} bans trigger **{action.lower()}** ({duration}).")
 
+    @antinuke_group.command(name="bandel")
+    @commands.has_permissions(administrator=True)
+    async def delete_ban_protect(self, ctx):
+        await self.config_col.update_one(
+            {"guild_id": str(ctx.guild.id)},
+            {"$set": {"ban_protect.amount": 0}},
+            upsert=True
+        )
+        await ctx.send("Ban protection filter has been removed and disabled.")
+
+    # --- APP COMMANDS ---
     @antinuke_group.command(name="app")
     @commands.has_permissions(administrator=True)
     async def set_app_protect(self, ctx, status: str):
@@ -283,20 +317,32 @@ class AntiNuke(commands.Cog):
         )
         await ctx.send(f"App/Bot Protection is now **{'ENABLED' if enabled else 'DISABLED'}**.")
 
-    @antinuke_group.command(name="whitelist")
+    # --- WHITELIST COMMANDS ---
+    @antinuke_group.command(name="whitelist", aliases=["wl"])
     @commands.has_permissions(administrator=True)
     async def toggle_whitelist(self, ctx, member: discord.Member):
         config = await self.get_config(ctx.guild.id)
         wl = config.get("whitelist", [])
         mid = str(member.id)
+        if mid not in wl:
+            wl.append(mid)
+            await self.config_col.update_one({"guild_id": str(ctx.guild.id)}, {"$set": {"whitelist": wl}}, upsert=True)
+            await ctx.send(f"{member.mention} added to AntiNuke whitelist.")
+        else:
+            await ctx.send(f"{member.mention} is already whitelisted.")
+
+    @antinuke_group.command(name="unwhitelist", aliases=["unwl"])
+    @commands.has_permissions(administrator=True)
+    async def remove_whitelist(self, ctx, member: discord.Member):
+        config = await self.get_config(ctx.guild.id)
+        wl = config.get("whitelist", [])
+        mid = str(member.id)
         if mid in wl:
             wl.remove(mid)
-            msg = f"{member.mention} removed from AntiNuke whitelist."
+            await self.config_col.update_one({"guild_id": str(ctx.guild.id)}, {"$set": {"whitelist": wl}}, upsert=True)
+            await ctx.send(f"{member.mention} removed from AntiNuke whitelist.")
         else:
-            wl.append(mid)
-            msg = f"{member.mention} added to AntiNuke whitelist."
-        await self.config_col.update_one({"guild_id": str(ctx.guild.id)}, {"$set": {"whitelist": wl}}, upsert=True)
-        await ctx.send(msg)
+            await ctx.send(f"{member.mention} is not in the whitelist.")
 
     @commands.command(name="whitelistuser", aliases=["auntinuke_whitelistuser"])
     @commands.has_permissions(administrator=True)
@@ -309,6 +355,7 @@ class AntiNuke(commands.Cog):
         embed = discord.Embed(title="Whitelisted Users", description=users_str, color=discord.Color.green())
         await ctx.send(embed=embed)
 
+    # --- LOGS COMMANDS ---
     @antinuke_group.command(name="logs")
     @commands.has_permissions(administrator=True)
     async def set_logs_channel(self, ctx, channel: discord.TextChannel):
@@ -319,6 +366,17 @@ class AntiNuke(commands.Cog):
         )
         await ctx.send(f"AntiNuke log channel set to {channel.mention}.")
 
+    @antinuke_group.command(name="logsdel")
+    @commands.has_permissions(administrator=True)
+    async def delete_logs_channel(self, ctx):
+        await self.config_col.update_one(
+            {"guild_id": str(ctx.guild.id)},
+            {"$set": {"log_channel_id": None}},
+            upsert=True
+        )
+        await ctx.send("AntiNuke log channel has been unlinked.")
+
+    # --- OVERVIEW & RESET ALL ---
     @antinuke_group.command(name="list")
     @commands.has_permissions(administrator=True)
     async def show_list_setup(self, ctx):
@@ -326,13 +384,16 @@ class AntiNuke(commands.Cog):
         embed = discord.Embed(title=f"AntiNuke Active Configuration - {ctx.guild.name}", color=discord.Color.gold())
         
         spam = c.get("spam", {})
-        embed.add_field(name="Spam Filter", value=f"Limit: `{spam.get('amount', 5)}`\nAction: `{spam.get('action', 'timeout').upper()}`\nDuration: `{spam.get('duration', '5m')}`", inline=True)
+        spam_val = f"Limit: `{spam.get('amount')}`\nAction: `{spam.get('action', 'timeout').upper()}`\nDuration: `{spam.get('duration', '5m')}`" if spam.get('amount', 0) > 0 else "Disabled"
+        embed.add_field(name="Spam Filter", value=spam_val, inline=True)
         
         url = c.get("url", {})
-        embed.add_field(name="URL Protection", value=f"Status: `{ 'ENABLED' if url.get('enabled') else 'DISABLED' }`\nAction: `{url.get('action', 'timeout').upper()}`\nDuration: `{url.get('duration', '5m')}`", inline=True)
+        url_val = f"Action: `{url.get('action', 'timeout').upper()}`\nDuration: `{url.get('duration', '5m')}`" if url.get('enabled') else "Disabled"
+        embed.add_field(name="URL Protection", value=url_val, inline=True)
         
         ban = c.get("ban_protect", {})
-        embed.add_field(name="Ban Protection", value=f"Limit: `{ban.get('amount', 2)}`\nAction: `{ban.get('action', 'timeout').upper()}`\nDuration: `{ban.get('duration', '1m')}`", inline=True)
+        ban_val = f"Limit: `{ban.get('amount')}`\nAction: `{ban.get('action', 'timeout').upper()}`\nDuration: `{ban.get('duration', '1m')}`" if ban.get('amount', 0) > 0 else "Disabled"
+        embed.add_field(name="Ban Protection", value=ban_val, inline=True)
         
         app = c.get("app", {})
         embed.add_field(name="App Protection", value=f"Status: `{ 'ENABLED' if app.get('enabled') else 'DISABLED' }`", inline=True)
@@ -342,6 +403,12 @@ class AntiNuke(commands.Cog):
         embed.add_field(name="Whitelisted Users", value=f"`{len(c.get('whitelist', []))}` Members", inline=True)
 
         await ctx.send(embed=embed)
+
+    @antinuke_group.command(name="resetall")
+    @commands.has_permissions(administrator=True)
+    async def reset_all_config(self, ctx):
+        await self.config_col.delete_one({"guild_id": str(ctx.guild.id)})
+        await ctx.send("All AntiNuke configurations for this server have been completely reset.")
 
 async def setup(bot):
     await bot.add_cog(AntiNuke(bot))
