@@ -10,7 +10,7 @@ BOT_TOKEN = os.getenv(
 OWNER_ID = 1302619411529732136
 
 # Lavalink Node Configuration for Music System
-LAVALINK_HOST = "In-1.visihost.in"
+LAVALINK_HOST = "in-1.visihost.in"
 LAVALINK_PORT = 3002
 LAVALINK_PASSWORD = "pvt@1211"
 LAVALINK_SECURE = False
