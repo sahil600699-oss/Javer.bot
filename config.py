@@ -2,7 +2,7 @@ import os
 
 # Bot Token Configuration (Render Environment Variable se uthayega)
 BOT_TOKEN = os.getenv(
-    "BOT_TOKEN",
+    "MTUzMjQyNzgzOTgzODg3OTc4NQ.Gzuhum.0H7OSoPcj2vPAViD-zKmw1P9dfXY1NTwYDkCos",
     "token",
 )
 
