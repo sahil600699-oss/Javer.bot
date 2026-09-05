@@ -62,16 +62,23 @@ class Music(commands.Cog):
         host = getattr(config, 'LAVALINK_HOST', 'in-1.visihost.in')
         port = getattr(config, 'LAVALINK_PORT', 3002)
         password = getattr(config, 'LAVALINK_PASSWORD', 'pvt@1211')
-        secure = getattr(config, 'LAVALINK_SECURE', False)
 
-        protocol = "https" if secure else "http"
-        node_uri = f"{protocol}://{host}:{port}"
+        # Direct HTTP connection string
+        node_uri = f"http://{host}:{port}"
         
-        nodes = [wavelink.Node(uri=node_uri, password=password)]
+        nodes = [
+            wavelink.Node(
+                identifier="MainNode",
+                uri=node_uri,
+                password=password
+            )
+        ]
+        
         try:
             await wavelink.Pool.connect(nodes=nodes, client=self.bot, inactive_player_timeout=300)
+            print(f"✅ Connecting to Lavalink Node: {node_uri}")
         except Exception as e:
-            print(f"⚠️ Lavalink connection attempt error: {e}")
+            print(f"❌ Lavalink connection error: {e}")
 
     @commands.Cog.listener()
     async def on_wavelink_node_ready(self, payload: wavelink.NodeReadyEventPayload):
@@ -109,13 +116,12 @@ class Music(commands.Cog):
             try:
                 vc = await ctx.author.voice.channel.connect(cls=wavelink.Player, self_deaf=True)
             except Exception as e:
-                return await ctx.send(f"❌ Failed to join voice channel: {e}")
+                return await ctx.send(f"❌ Failed to join voice channel: `{e}`")
 
         state = get_state(ctx.guild.id)
         state.text_channel = ctx.channel
 
         try:
-            # Wavelink 3.x Search
             tracks: wavelink.Search = await wavelink.Playable.search(query)
             if not tracks:
                 return await ctx.send("❌ No results found for your query!")
@@ -142,7 +148,7 @@ class Music(commands.Cog):
                     await ctx.send(f"📋 Added to queue: **{track.title}**")
 
         except Exception as e:
-            await ctx.send(f"❌ Music Error: `{str(e)}`")
+            await ctx.send(f"❌ Play error: `{str(e)}`")
 
     @commands.command(name="stop")
     async def stop(self, ctx):
@@ -164,4 +170,4 @@ class Music(commands.Cog):
 
 async def setup(bot):
     await bot.add_cog(Music(bot))
-    
+                    
