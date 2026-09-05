@@ -11,112 +11,53 @@ class MusicState:
         self.queue = []
         self.current = None
         self.text_channel = None
-        self.volume = 100
 
 def get_state(guild_id):
     if guild_id not in states:
         states[guild_id] = MusicState()
     return states[guild_id]
 
-class MusicControlView(discord.ui.View):
-    def __init__(self, guild_id):
-        super().__init__(timeout=None)
-        self.guild_id = guild_id
-
-    @discord.ui.button(label="Pause/Resume", style=discord.ButtonStyle.primary, emoji="⏯️")
-    async def pause_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        vc: wavelink.Player = interaction.guild.voice_client
-        if not vc or not vc.current:
-            return await interaction.response.send_message("❌ Nothing is playing!", ephemeral=True)
-
-        await vc.pause(not vc.paused)
-        status = "paused" if vc.paused else "resumed"
-        await interaction.response.send_message(f"▶️ Playback {status}!", ephemeral=True)
-
-    @discord.ui.button(label="Skip", style=discord.ButtonStyle.secondary, emoji="⏭️")
-    async def skip_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        vc: wavelink.Player = interaction.guild.voice_client
-        if not vc or not vc.current:
-            return await interaction.response.send_message("❌ Nothing to skip!", ephemeral=True)
-        await vc.skip()
-        await interaction.response.send_message("⏩ Skipped!", ephemeral=True)
-
-    @discord.ui.button(label="Stop", style=discord.ButtonStyle.danger, emoji="⏹️")
-    async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        vc: wavelink.Player = interaction.guild.voice_client
-        state = get_state(self.guild_id)
-        state.queue.clear()
-        state.current = None
-        if vc:
-            await vc.disconnect()
-        await interaction.response.send_message("⏹️ Playback stopped!", ephemeral=True)
-
 class Music(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-
-    async def cog_load(self):
-        asyncio.create_task(self.connect_lavalink())
+        # Bot startup ke baad hi node connect hoga
+        self.bot.loop.create_task(self.connect_lavalink())
 
     async def connect_lavalink(self):
+        await self.bot.wait_until_ready()
+        
         host = getattr(config, 'LAVALINK_HOST', 'in-1.visihost.in')
         port = getattr(config, 'LAVALINK_PORT', 3002)
         password = getattr(config, 'LAVALINK_PASSWORD', 'pvt@1211')
 
-        # Direct HTTP connection string
         node_uri = f"http://{host}:{port}"
-        
-        nodes = [
-            wavelink.Node(
-                identifier="MainNode",
-                uri=node_uri,
-                password=password
-            )
-        ]
-        
-        try:
-            await wavelink.Pool.connect(nodes=nodes, client=self.bot, inactive_player_timeout=300)
-            print(f"✅ Connecting to Lavalink Node: {node_uri}")
-        except Exception as e:
-            print(f"❌ Lavalink connection error: {e}")
+        node = wavelink.Node(identifier="MainNode", uri=node_uri, password=password)
 
-    @commands.Cog.listener()
-    async def on_wavelink_node_ready(self, payload: wavelink.NodeReadyEventPayload):
-        print(f"✅ Lavalink Node '{payload.node.identifier}' is ready and connected!")
-
-    @commands.Cog.listener()
-    async def on_wavelink_track_end(self, payload: wavelink.TrackEndEventPayload):
-        player = payload.player
-        if not player or not player.guild:
-            return
-        
-        state = get_state(player.guild.id)
-        if state.queue:
-            next_track = state.queue.pop(0)
-            state.current = next_track
-            await player.play(next_track)
-
-            embed = discord.Embed(
-                title="🎵 Now Playing",
-                description=f"**[{next_track.title}]({next_track.uri})**",
-                color=discord.Color.blurple()
-            )
-            if state.text_channel:
-                await state.text_channel.send(embed=embed, view=MusicControlView(player.guild.id))
-        else:
-            state.current = None
+        while True:
+            try:
+                if not wavelink.Pool.nodes:
+                    await wavelink.Pool.connect(nodes=[node], client=self.bot, inactive_player_timeout=300)
+                    print(f"✅ Lavalink Connected: {node_uri}")
+                break
+            except Exception as e:
+                print(f"🔄 Retrying Lavalink Connection in 5s... ({e})")
+                await asyncio.sleep(5)
 
     @commands.command(name="play", aliases=["p"])
     async def play(self, ctx: commands.Context, *, query: str):
         if not ctx.author.voice:
             return await ctx.send("❌ You must be in a voice channel!")
 
+        # Check if node is ready before connecting player
+        if not wavelink.Pool.nodes or not any(n.status == wavelink.NodeStatus.CONNECTED for n in wavelink.Pool.nodes.values()):
+            return await ctx.send("⏳ Lavalink Node is still connecting, please try again in 5 seconds...")
+
         vc: wavelink.Player = ctx.voice_client
         if not vc:
             try:
                 vc = await ctx.author.voice.channel.connect(cls=wavelink.Player, self_deaf=True)
             except Exception as e:
-                return await ctx.send(f"❌ Failed to join voice channel: `{e}`")
+                return await ctx.send(f"❌ Voice Connect Error: `{e}`")
 
         state = get_state(ctx.guild.id)
         state.text_channel = ctx.channel
@@ -124,50 +65,21 @@ class Music(commands.Cog):
         try:
             tracks: wavelink.Search = await wavelink.Playable.search(query)
             if not tracks:
-                return await ctx.send("❌ No results found for your query!")
+                return await ctx.send("❌ No results found!")
 
-            if isinstance(tracks, wavelink.Playlist):
-                added_count = len(tracks.tracks)
-                if not vc.current:
-                    first_track = tracks.tracks[0]
-                    state.queue.extend(tracks.tracks[1:])
-                    state.current = first_track
-                    await vc.play(first_track)
-                    await ctx.send(f"🎶 Playing: **{first_track.title}** (Added {added_count - 1} tracks to queue)", view=MusicControlView(ctx.guild.id))
-                else:
-                    state.queue.extend(tracks.tracks)
-                    await ctx.send(f"📋 Added **{added_count} tracks** to the queue!")
+            track = tracks[0] if not isinstance(tracks, wavelink.Playlist) else tracks.tracks[0]
+            
+            if not vc.current:
+                state.current = track
+                await vc.play(track)
+                await ctx.send(f"🎶 Now Playing: **{track.title}**")
             else:
-                track = tracks[0]
-                if not vc.current:
-                    state.current = track
-                    await vc.play(track)
-                    await ctx.send(f"🎶 Now Playing: **{track.title}**", view=MusicControlView(ctx.guild.id))
-                else:
-                    state.queue.append(track)
-                    await ctx.send(f"📋 Added to queue: **{track.title}**")
+                state.queue.append(track)
+                await ctx.send(f"📋 Added to queue: **{track.title}**")
 
         except Exception as e:
-            await ctx.send(f"❌ Play error: `{str(e)}`")
-
-    @commands.command(name="stop")
-    async def stop(self, ctx):
-        vc: wavelink.Player = ctx.voice_client
-        state = get_state(ctx.guild.id)
-        state.queue.clear()
-        state.current = None
-        if vc:
-            await vc.disconnect()
-        await ctx.send("⏹️ Stopped playback and cleared queue!")
-
-    @commands.command(name="skip", aliases=["s"])
-    async def skip(self, ctx):
-        vc: wavelink.Player = ctx.voice_client
-        if not vc or not vc.current:
-            return await ctx.send("❌ Nothing playing right now!")
-        await vc.skip()
-        await ctx.send("⏩ Skipped!")
+            await ctx.send(f"❌ Play Error: `{e}`")
 
 async def setup(bot):
     await bot.add_cog(Music(bot))
-                    
+    
