@@ -1,9 +1,7 @@
 import os
 
-# Bot Token Configuration
-# Priority 1: Render Environment Variable (Secret)
-# Note: Local code mein hardcoded token bilkul nahi daalna hai, warna GitHub leak kar dega.
-BOT_TOKEN = os.getenv("")
+# Bot Token (Render Environment Variable se read karega)
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 # Bot Owner Configuration
 OWNER_ID = 1302619411529732136
