@@ -2,12 +2,9 @@ import os
 
 # Bot Token Configuration (Render Environment Variable se uthayega)
 BOT_TOKEN = os.getenv(
-    "MTUzMjQyNzgzOTgzODg3OTc4NQ.Gzuhum.0H7OSoPcj2vPAViD-zKmw1P9dfXY1NTwYDkCos",
-    "token",
+    "BOT_TOKEN",
+    "MTUzMjQyNzgzOTgzODg3OTc4NQ.GtM1DM.rW7N4HnwYfqmCVFxPmvkTMBCeFn2nIBabOQIL0",
 )
-
-# Prefix used by message commands, e.g. !play <song>
-COMMAND_PREFIX = os.getenv("COMMAND_PREFIX", "!")
 
 # Bot Owner Configuration
 OWNER_ID = 1302619411529732136
