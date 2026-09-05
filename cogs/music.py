@@ -4,7 +4,6 @@ from discord.ext import commands
 import wavelink
 import config
 
-# State structure for custom track queue and settings management
 states = {}
 
 class MusicState:
@@ -27,7 +26,7 @@ class MusicControlView(discord.ui.View):
         self.guild_id = guild_id
 
     @discord.ui.button(label="Pause", style=discord.ButtonStyle.primary, emoji="⏸️")
-    async def pause_button(self, interaction, button):
+    async def pause_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         vc: wavelink.Player = interaction.guild.voice_client
         state = get_state(self.guild_id)
         if not vc or not vc.current:
@@ -49,7 +48,7 @@ class MusicControlView(discord.ui.View):
             await interaction.followup.send("⏸️ Playback paused!", ephemeral=True)
 
     @discord.ui.button(label="Skip", style=discord.ButtonStyle.secondary, emoji="⏭️")
-    async def skip_button(self, interaction, button):
+    async def skip_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         vc: wavelink.Player = interaction.guild.voice_client
         if not vc or not vc.current:
             return await interaction.response.send_message("❌ Nothing to skip!", ephemeral=True)
@@ -57,7 +56,7 @@ class MusicControlView(discord.ui.View):
         await interaction.response.send_message("⏩ Skipped!", ephemeral=True)
 
     @discord.ui.button(label="Queue", style=discord.ButtonStyle.secondary, emoji="📋")
-    async def queue_button(self, interaction, button):
+    async def queue_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         state = get_state(self.guild_id)
         if not state.queue:
             return await interaction.response.send_message("📋 Queue is empty!", ephemeral=True)
@@ -68,7 +67,7 @@ class MusicControlView(discord.ui.View):
         )
 
     @discord.ui.button(label="Vol -", style=discord.ButtonStyle.secondary, emoji="🔉")
-    async def volume_down(self, interaction, button):
+    async def volume_down(self, interaction: discord.Interaction, button: discord.ui.Button):
         state = get_state(self.guild_id)
         vc: wavelink.Player = interaction.guild.voice_client
         state.volume = max(0, state.volume - 10)
@@ -77,7 +76,7 @@ class MusicControlView(discord.ui.View):
         await interaction.response.send_message(f"🔉 Volume: **{state.volume}%**", ephemeral=True)
 
     @discord.ui.button(label="Vol +", style=discord.ButtonStyle.secondary, emoji="🔊")
-    async def volume_up(self, interaction, button):
+    async def volume_up(self, interaction: discord.Interaction, button: discord.ui.Button):
         state = get_state(self.guild_id)
         vc: wavelink.Player = interaction.guild.voice_client
         state.volume = min(200, state.volume + 10)
@@ -86,7 +85,7 @@ class MusicControlView(discord.ui.View):
         await interaction.response.send_message(f"🔊 Volume: **{state.volume}%**", ephemeral=True)
 
     @discord.ui.button(label="Stop", style=discord.ButtonStyle.danger, emoji="⏹️")
-    async def stop_button(self, interaction, button):
+    async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         state = get_state(self.guild_id)
         vc: wavelink.Player = interaction.guild.voice_client
         state.queue.clear()
@@ -102,12 +101,25 @@ class Music(commands.Cog):
         self.bot = bot
 
     async def cog_load(self):
-        # Direct config.py values use honge
-        node_uri = f"http://{getattr(config, 'LAVALINK_HOST', '127.0.0.1')}:{getattr(config, 'LAVALINK_PORT', 2333)}"
-        node_pass = getattr(config, 'LAVALINK_PASSWORD', 'youshallnotpass')
+        # Event loop ko freeze hone se bachane ke liye background task chalaya hai
+        asyncio.create_task(self.connect_lavalink())
+
+    async def connect_lavalink(self):
+        host = getattr(config, 'LAVALINK_HOST', '127.0.0.1')
+        port = getattr(config, 'LAVALINK_PORT', 2333)
+        password = getattr(config, 'LAVALINK_PASSWORD', 'youshallnotpass')
+        secure = getattr(config, 'LAVALINK_SECURE', False)
+
+        protocol = "https" if secure else "http"
+        node_uri = f"{protocol}://{host}:{port}"
         
-        nodes = [wavelink.Node(uri=node_uri, password=node_pass)]
-        await wavelink.Pool.connect(nodes=nodes, client=self.bot)
+        nodes = [wavelink.Node(uri=node_uri, password=password)]
+        
+        try:
+            await wavelink.Pool.connect(nodes=nodes, client=self.bot, inactive_player_timeout=300)
+            print("✅ Lavalink pool initialized.")
+        except Exception as e:
+            print(f"⚠️ Lavalink failed to connect: {e}")
 
     @commands.Cog.listener()
     async def on_wavelink_node_ready(self, payload: wavelink.NodeReadyEventPayload):
@@ -320,4 +332,4 @@ class Music(commands.Cog):
 
 async def setup(bot):
     await bot.add_cog(Music(bot))
-                       
+                
